@@ -21,7 +21,7 @@ async function getBriefingContent(userId) {
         [userId]
     );
     const user = userRes.rows[0] || {};
-    const callsign = user.callsign || 'Bos';
+    const callsign = user.callsign || user.display_name || 'Kawan';
 
     // 2. Task Pending Hari Ini
     const tasksRes = await db.query(
@@ -100,7 +100,7 @@ async function getRecapContent(userId) {
         [userId]
     );
     const user = userRes.rows[0] || {};
-    const callsign = user.callsign || 'Bos';
+    const callsign = user.callsign || user.display_name || 'Kawan';
 
     // 1. Task Selesai vs Pending
     const taskStats = await db.query(

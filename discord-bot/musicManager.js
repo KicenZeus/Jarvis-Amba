@@ -149,7 +149,7 @@ async function playMusic(voiceChannel, textChannel, query, user) {
             streamUrl: query,
             isDirectStream: true,
             duration: 'Live Stream',
-            requestedBy: user.displayName || user.username || 'Bos',
+            requestedBy: user.displayName || user.username || 'Teman',
         };
     } else if (query.includes('soundcloud.com/')) {
         // 2. Link SoundCloud langsung
@@ -159,7 +159,7 @@ async function playMusic(voiceChannel, textChannel, query, user) {
             url: info.url,
             duration: info.duration,
             transcodings: info.transcodings,
-            requestedBy: user.displayName || user.username || 'Bos',
+            requestedBy: user.displayName || user.username || 'Teman',
         };
     } else {
         // 3. Cek apakah link YouTube atau Spotify
@@ -189,7 +189,7 @@ async function playMusic(voiceChannel, textChannel, query, user) {
             url: (ext && ext.originalUrl) || top.url,
             duration: top.duration,
             transcodings: top.transcodings,
-            requestedBy: user.displayName || user.username || 'Bos',
+            requestedBy: user.displayName || user.username || 'Teman',
         };
     }
 

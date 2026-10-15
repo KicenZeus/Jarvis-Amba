@@ -136,6 +136,43 @@ function cleanBotTrigger(text, botId = null) {
 }
 
 /**
+ * Mendapatkan informasi panggilan dan etiket sapaan pengguna:
+ * - Pengguna yang sudah punya callsign di database (atau owner) dipanggil dengan callsign tersebut.
+ * - Pengguna baru / belum mengatur panggilan dipanggil dengan nama/nickname Discord aslinya.
+ */
+async function resolveUserGreetingInfo(author, member = null) {
+    const rawNickname = member?.displayName || author.displayName || author.globalName || author.username || 'Kawan';
+    const cleanNickname = rawNickname.replace(/\[.*?\]|\(.*?\)/g, '').trim() || author.username || 'Kawan';
+
+    const isOwner = author.id === '713137141072396370' || author.id === '344840856006459392';
+
+    let callsign = null;
+    try {
+        const res = await db.query(
+            'SELECT callsign FROM users WHERE discord_user_id = $1 OR id = $1 LIMIT 1;',
+            [author.id]
+        );
+        if (res.rows[0]?.callsign && res.rows[0].callsign.trim()) {
+            callsign = res.rows[0].callsign.trim();
+        }
+    } catch (err) {
+        console.warn('⚠️ Gagal mengambil callsign user dari DB:', err.message);
+    }
+
+    if (isOwner && !callsign) {
+        callsign = 'Bos';
+    }
+
+    return {
+        cleanNickname,
+        callsign,
+        preferredName: callsign || cleanNickname,
+        hasCustomCallsign: Boolean(callsign),
+        isOwner,
+    };
+}
+
+/**
  * Menentukan mode balasan: 'text', 'voice', atau 'both'
  * - 'text' : Hanya kirim teks chat Discord
  * - 'voice': Hanya kirim file audio voice note (.mp3)
@@ -218,6 +255,10 @@ client.on(Events.MessageCreate, async (message) => {
             return;
         }
 
+        // Dapatkan informasi panggilan user (nama asli / nickname vs callsign terdaftar)
+        const greetingInfo = await resolveUserGreetingInfo(message.author, message.member);
+        const preferredName = greetingInfo.preferredName;
+
         // Cek Keamanan & RBAC (Phase 7: Blokir Akses jika user berstatus BLOCKED)
         const callerRole = await security.getUserRole(message.author.id);
         if (callerRole.name === 'BLOCKED') {
@@ -228,7 +269,7 @@ client.on(Events.MessageCreate, async (message) => {
                 status: 'BLOCKED',
                 metadata: { channel: message.channel.name || 'DM', text: rawText.substring(0, 100) },
             });
-            return message.reply('🚫 Akses akun Bos saat ini telah dinonaktifkan/diblokir oleh Administrator Jarvis.').catch(() => {});
+            return message.reply(`🚫 Akses akun ${preferredName} saat ini telah dinonaktifkan/diblokir oleh Administrator Jarvis.`).catch(() => {});
         }
 
         const cleanedContent = cleanBotTrigger(rawText, botId);
@@ -237,19 +278,19 @@ client.on(Events.MessageCreate, async (message) => {
         const isJoinVC = /(\b(join\s*vc|masuk\s*vc|gabung\s*vc|join\s*voice|masuk\s*voice)\b|^!(join|vc)\b)/i.test(cleanedContent || rawText);
         if (isJoinVC) {
             if (!message.guild) {
-                return message.reply('Perintah Voice Channel hanya bisa dipakai di dalam Server/Guild ya Bos!');
+                return message.reply(`Perintah Voice Channel hanya bisa dipakai di dalam Server/Guild ya ${preferredName}!`);
             }
             const voiceChannel = message.member?.voice?.channel;
             if (!voiceChannel) {
-                return message.reply('Bos belum masuk ke Voice Channel nih. Masuk dulu ke salah satu voice channel, baru panggil Amba ya! 🎧');
+                return message.reply(`${preferredName} belum masuk ke Voice Channel nih. Masuk dulu ke salah satu voice channel, baru panggil Amba ya! 🎧`);
             }
             try {
                 await joinVoice(voiceChannel, (userId, buffer, gId) => handleVoiceChannelAudio(userId, buffer, gId, message.channel));
-                await message.reply(`✅ Siap Bos! Amba sudah gabung di Voice Channel **${voiceChannel.name}**. Langsung ngomong aja di room suara, Amba dengerin! 🎙️`);
-                speakInVoice(message.guild.id, 'Halo Bos! Amba sudah standby di room suara nih. Ada yang bisa Amba bantu?').catch(() => {});
+                await message.reply(`✅ Siap ${preferredName}! Amba sudah gabung di Voice Channel **${voiceChannel.name}**. Langsung ngomong aja di room suara, Amba dengerin! 🎙️`);
+                speakInVoice(message.guild.id, `Halo ${preferredName}! Amba sudah standby di room suara nih. Ada yang bisa Amba bantu?`).catch(() => {});
                 return;
             } catch (err) {
-                return message.reply(`Aduh Bos, gagal masuk ke Voice Channel: ${err.message}`);
+                return message.reply(`Aduh ${preferredName}, gagal masuk ke Voice Channel: ${err.message}`);
             }
         }
 
@@ -257,14 +298,14 @@ client.on(Events.MessageCreate, async (message) => {
         const isLeaveVC = /(\b(leave\s*vc|cabut\s*vc|keluar\s*vc|dc\s*vc|disconnect\s*vc|stop\s*vc)\b|^!(leave|dc|disconnect)\b)/i.test(cleanedContent || rawText);
         if (isLeaveVC) {
             if (!message.guild) {
-                return message.reply('Perintah Voice Channel hanya bisa dipakai di dalam Server/Guild ya Bos!');
+                return message.reply(`Perintah Voice Channel hanya bisa dipakai di dalam Server/Guild ya ${preferredName}!`);
             }
             if (!isInVoice(message.guild.id)) {
-                return message.reply('Amba lagi gak ada di Voice Channel mana pun kok, Bos.');
+                return message.reply(`Amba lagi gak ada di Voice Channel mana pun kok, ${preferredName}.`);
             }
-            await speakInVoice(message.guild.id, 'Oke Bos, Amba pamit undur diri dulu ya!').catch(() => {});
+            await speakInVoice(message.guild.id, `Oke ${preferredName}, Amba pamit undur diri dulu ya!`).catch(() => {});
             leaveVoice(message.guild.id);
-            return message.reply('👋 Amba sudah keluar dari Voice Channel. Kalau butuh lagi tinggal panggil `amba join vc` ya Bos!');
+            return message.reply(`👋 Amba sudah keluar dari Voice Channel. Kalau butuh lagi tinggal panggil \`amba join vc\` ya ${preferredName}!`);
         }
 
         // --- PERINTAH MUSIK ---
@@ -272,11 +313,11 @@ client.on(Events.MessageCreate, async (message) => {
         const playMatch = (cleanedContent || rawText).match(/^(!play|!p|play|p|putar\s*lagu|putar|setel\s*lagu|setel)\s+(.+)$/i);
         if (playMatch) {
             if (!message.guild) {
-                return message.reply('Fitur musik hanya bisa dipakai di dalam Server/Guild ya Bos!');
+                return message.reply(`Fitur musik hanya bisa dipakai di dalam Server/Guild ya ${preferredName}!`);
             }
             const voiceChannel = message.member?.voice?.channel;
             if (!voiceChannel) {
-                return message.reply('Bos harus masuk ke salah satu Voice Channel dulu sebelum memutar musik! 🎧');
+                return message.reply(`${preferredName} harus masuk ke salah satu Voice Channel dulu sebelum memutar musik! 🎧`);
             }
             const query = playMatch[2].trim();
             await message.reply(`🔍 Sedang mencari dan menyiapkan lagu **"${query}"**...`).catch(() => {});
@@ -340,7 +381,7 @@ client.on(Events.MessageCreate, async (message) => {
             if (!message.guild) return;
             const q = getQueueList(message.guild.id);
             if (!q.current && q.queue.length === 0) {
-                return message.reply('📭 Antrean musik masih kosong nih, Bos! Putar lagu pakai `!p <judul/link>`.');
+                return message.reply(`📭 Antrean musik masih kosong nih, ${preferredName}! Putar lagu pakai \`!p <judul/link>\`.`);
             }
             let text = `🎶 **Sedang Berputar:** ${q.current ? `**${q.current.title}** (${q.current.duration})` : 'Tidak ada'}\n`;
             if (q.queue.length > 0) {
@@ -386,7 +427,7 @@ client.on(Events.MessageCreate, async (message) => {
         // --- IDENTITAS PEMBUAT (kicenzeus) ---
         const creatorRegex = /(\b(siapa\s*(yang\s*)?(buat|bikin|ciptain|develop|program)\s*(lu|kamu|amba|bot)|siapa\s*pembuat(mu|nya)?|siapa\s*creator(mu|nya)?|pembuat\s*(lu|kamu|amba)|who\s*(made|created)\s*you)\b)/i;
         if (creatorRegex.test(cleanedContent || rawText)) {
-            return message.reply('Gua dibuat dan dikembangkan oleh **kicenzeus**, Bos! 😎🔥 Beliau yang merancang dan ngoding sistem gua biar bisa jadi asisten pribadi pintar sekaligus bot pemutar musik berkualitas tinggi di Discord. Mau dibantu apa nih hari ini?').catch(() => {});
+            return message.reply(`Gua dibuat dan dikembangkan oleh **kicenzeus**, ${preferredName}! 😎🔥 Beliau yang merancang dan ngoding sistem gua biar bisa jadi asisten pribadi pintar sekaligus bot pemutar musik berkualitas tinggi di Discord. Mau dibantu apa nih hari ini?`).catch(() => {});
         }
 
         // --- FITUR MEMORI (PHASE 1) ---
@@ -409,9 +450,9 @@ client.on(Events.MessageCreate, async (message) => {
                 const forgotten = await forgetMemory(message.author.id, targetKey);
                 if (forgotten && forgotten.length > 0) {
                     const keys = forgotten.map(f => `\`${f.key}\``).join(', ');
-                    return message.reply(`🗑️ Siap Bos! Ingatan tentang ${keys} sudah Amba hapus dari memori.`);
+                    return message.reply(`🗑️ Siap ${preferredName}! Ingatan tentang ${keys} sudah Amba hapus dari memori.`);
                 } else {
-                    return message.reply(`Amba tidak menemukan ingatan aktif yang cocok dengan kata kunci **"${targetKey}"**, Bos.`);
+                    return message.reply(`Amba tidak menemukan ingatan aktif yang cocok dengan kata kunci **"${targetKey}"**, ${preferredName}.`);
                 }
             } catch (err) {
                 return message.reply(`⚠️ Gagal melupakan memori: ${err.message}`);
@@ -446,9 +487,9 @@ client.on(Events.MessageCreate, async (message) => {
             try {
                 const res = await snoozeReminder(message.author.id, minutes);
                 if (res && res.reminder) {
-                    return message.reply(`⏰ Siap Bos! Pengingat **"${res.reminder.title}"** sudah Amba tunda (**snooze**) selama **${res.minutes} menit**. Nanti Amba colek lagi! 🫡`);
+                    return message.reply(`⏰ Siap ${preferredName}! Pengingat **"${res.reminder.title}"** sudah Amba tunda (**snooze**) selama **${res.minutes} menit**. Nanti Amba colek lagi! 🫡`);
                 } else {
-                    return message.reply('Amba tidak menemukan pengingat yang baru saja berbunyi untuk di-snooze nih, Bos.');
+                    return message.reply(`Amba tidak menemukan pengingat yang baru saja berbunyi untuk di-snooze nih, ${preferredName}.`);
                 }
             } catch (err) {
                 return message.reply(`⚠️ Gagal menunda pengingat: ${err.message}`);
@@ -462,7 +503,7 @@ client.on(Events.MessageCreate, async (message) => {
                     'UPDATE users SET daily_briefing_enabled = TRUE, briefing_channel_id = $2 WHERE id = $1',
                     [message.author.id, message.channel.id]
                 );
-                return message.reply('☀️ Siap Bos! Daily Briefing pagi otomatis telah **diaktifkan**. Amba akan menyapa dan merangkum agenda Bos setiap pagi di channel ini! ☕');
+                return message.reply(`☀️ Siap ${preferredName}! Daily Briefing pagi otomatis telah **diaktifkan**. Amba akan menyapa dan merangkum agenda ${preferredName} setiap pagi di channel ini! ☕`);
             } catch (err) {
                 return message.reply(`⚠️ Gagal mengatur briefing: ${err.message}`);
             }
@@ -474,7 +515,7 @@ client.on(Events.MessageCreate, async (message) => {
                     'UPDATE users SET daily_briefing_enabled = FALSE WHERE id = $1',
                     [message.author.id]
                 );
-                return message.reply('Siap Bos! Daily Briefing pagi otomatis telah **dinonaktifkan**.');
+                return message.reply(`Siap ${preferredName}! Daily Briefing pagi otomatis telah **dinonaktifkan**.`);
             } catch (err) {
                 return message.reply(`⚠️ Gagal mengatur briefing: ${err.message}`);
             }
@@ -486,7 +527,7 @@ client.on(Events.MessageCreate, async (message) => {
                     'UPDATE users SET daily_recap_enabled = TRUE, briefing_channel_id = $2 WHERE id = $1',
                     [message.author.id, message.channel.id]
                 );
-                return message.reply('📊 Siap Bos! Daily Recap malam otomatis telah **diaktifkan**. Amba akan merangkum pencapaian dan pengeluaran Bos setiap malam di channel ini! 🌙');
+                return message.reply(`📊 Siap ${preferredName}! Daily Recap malam otomatis telah **diaktifkan**. Amba akan merangkum pencapaian dan pengeluaran ${preferredName} setiap malam di channel ini! 🌙`);
             } catch (err) {
                 return message.reply(`⚠️ Gagal mengatur recap: ${err.message}`);
             }
@@ -498,7 +539,7 @@ client.on(Events.MessageCreate, async (message) => {
                     'UPDATE users SET daily_recap_enabled = FALSE WHERE id = $1',
                     [message.author.id]
                 );
-                return message.reply('Siap Bos! Daily Recap malam otomatis telah **dinonaktifkan**.');
+                return message.reply(`Siap ${preferredName}! Daily Recap malam otomatis telah **dinonaktifkan**.`);
             } catch (err) {
                 return message.reply(`⚠️ Gagal mengatur recap: ${err.message}`);
             }
@@ -509,7 +550,7 @@ client.on(Events.MessageCreate, async (message) => {
         if (/^(!diam|diam|stop\s*voice|stop\s*ngomong|berhenti\s*ngomong|cukup)$/i.test(cleanedContent || rawText)) {
             if (message.guild && isSpeakingInVoice(message.guild.id)) {
                 interruptVoice(message.guild.id);
-                return message.reply('🛑 Siap Bos! Pembicaraan di Voice Channel langsung Amba hentikan.');
+                return message.reply(`🛑 Siap ${preferredName}! Pembicaraan di Voice Channel langsung Amba hentikan.`);
             }
         }
 
@@ -816,20 +857,20 @@ client.on(Events.MessageCreate, async (message) => {
             return message.reply(
                 `⚠️ **PERINGATAN AKSI BERISIKO TINGGI!**\n` +
                 `${highRisk.warning}\n\n` +
-                `Apakah Bos benar-benar yakin ingin melanjutkan?\n` +
+                `Apakah ${preferredName} benar-benar yakin ingin melanjutkan?\n` +
                 `• Ketik **'ya lanjut'** untuk mengeksekusi.\n` +
                 `• Ketik **'batal'** untuk membatalkan.`
             );
         }
 
-        // Jika user cuma mention bot atau cuma ketik "amba" tanpa perintah lain
-        if (!cleanedContent || cleanedContent.toLowerCase() === 'amba') {
-            await message.reply('Yo Bos! Ada yang bisa Amba bantu? Mau pasang pengingat, catat tugas, tanya sesuatu, putar musik (`!p`), atau cek panduan (`!help`)? Langsung colek aja ya! 🔥').catch(() => {});
-            return;
+        // Jika user cuma mention bot atau cuma ketik sapaan ("halo amba", "amba", "hai amba", @Amba)
+        let textToProcess = cleanedContent;
+        if (!textToProcess || textToProcess.toLowerCase() === 'amba') {
+            textToProcess = rawText.replace(new RegExp(`<@!?${botId}>`, 'g'), '').trim() || 'Halo Amba';
         }
 
-        // Jalankan pemrosesan ke n8n
-        return processBotRequest(message, cleanedContent, false);
+        // Jalankan pemrosesan dinamis ke AI n8n
+        return processBotRequest(message, textToProcess, false);
     }
 
     // KASUS B: Ada Pesan Suara (Voice Note / Audio File)
@@ -854,7 +895,8 @@ client.on(Events.MessageCreate, async (message) => {
         clearInterval(typingInterval);
         console.error('❌ Gagal transkripsi audio:', sttErr.message);
         if (isDM || isReplyToBot || textHasTrigger) {
-            await message.reply('Aduh Bos, rekaman suaranya kurang jelas nih atau gagal diproses. Boleh diulang?').catch(() => {});
+            const voiceGreeting = await resolveUserGreetingInfo(message.author, message.member);
+            await message.reply(`Aduh ${voiceGreeting.preferredName}, rekaman suaranya kurang jelas nih atau gagal diproses. Boleh diulang?`).catch(() => {});
         }
         return;
     }
@@ -881,7 +923,7 @@ client.on(Events.MessageCreate, async (message) => {
 /**
  * Memperkaya pesan percakapan dengan konteks Web Intelligence & Personal Analytics secara otomatis
  */
-async function enrichMessageWithWebIntelligence(content, userId = null) {
+async function enrichMessageWithWebIntelligence(content, userId = null, greetingInfo = null) {
     if (!content || typeof content !== 'string') return content;
     let enriched = content;
 
@@ -986,7 +1028,7 @@ Tugas (Tasks):
 - Overdue: ${report.tasks.overdue} tugas
 Pengingat (Reminders):
 - Terkirim: ${report.reminders.sent} | Ditunda (Snoozed): ${report.reminders.snoozed} kali
-Instruksi AI: Gunakan data analitik personal pengguna di atas untuk menjawab pertanyaan Bos secara spesifik, akurat, ramah, dan berikan wawasan atau saran proaktif yang membangun.]`;
+Instruksi AI: Gunakan data analitik personal pengguna di atas untuk menjawab pertanyaan ${greetingInfo ? greetingInfo.preferredName : 'pengguna'} secara spesifik, akurat, ramah, dan berikan wawasan atau saran proaktif yang membangun.]`;
         } catch (err) {
             console.warn(`⚠️ [Analytics] Gagal menarik analitik: ${err.message}`);
         }
@@ -1016,6 +1058,23 @@ Instruksi AI: Jelaskan role dan hak akses pengguna secara akurat, percaya diri, 
         }
     }
 
+    // 6. Konteks Panggilan & Etiket Sapaan Pengguna
+    if (greetingInfo) {
+        if (greetingInfo.hasCustomCallsign) {
+            enriched += `\n\n[Konteks Panggilan Pengguna:\n- Nama Asli/Discord: "${greetingInfo.cleanNickname}"\n- Panggilan Khusus yang Disepakati: "${greetingInfo.callsign}"\n- Instruksi AI: Pengguna ini sudah memiliki panggilan khusus ("${greetingInfo.callsign}"). Panggil pengguna ini secara konsisten dengan panggilan "${greetingInfo.callsign}".]`;
+        } else {
+            enriched += `\n\n[Konteks Panggilan Pengguna:\n- Nama/Nickname Discord: "${greetingInfo.cleanNickname}"\n- Status: Pengguna baru / belum mengatur panggilan khusus.\n- PENTING: Panggil pengguna dengan nama aslinya/nicknamenya ("${greetingInfo.cleanNickname}"). JANGAN memanggil "Bos" kepada pengguna ini kecuali jika pengguna sendiri yang meminta panggilan tersebut!]`;
+        }
+
+        // Jika isi pesan terdeteksi sebagai sapaan santai / greeting
+        const isGreeting = /^(halo|hai|hey|yo|pagi|siang|sore|malam|permisi|assalamu|oy|oi|tes|test|halo amba|hai amba|amba)\b/i.test(content.trim()) ||
+                           content.trim().length === 0 ||
+                           content.trim().toLowerCase() === 'amba';
+        if (isGreeting) {
+            enriched += `\n\n[Instruksi Sapaan Khusus:\nPengguna sedang menyapa. Balas sapaan dengan ramah, santai, variatif, dan alami selayaknya asisten pintar yang asyik. JANGAN gunakan template kaku atau mengulang balasan yang sama!]`;
+        }
+    }
+
     return enriched;
 }
 
@@ -1033,14 +1092,17 @@ async function processBotRequest(message, content, isVoiceInput, existingTypingI
 
     let agentRunId = null;
 
+    // Ambil profil panggilan pengguna (callsign vs nickname asli)
+    const greetingInfo = await resolveUserGreetingInfo(message.author, message.member);
+
     // Web Intelligence & Personal Analytics Context Injection untuk percakapan natural
-    const finalContent = await enrichMessageWithWebIntelligence(content, message.author.id);
+    const finalContent = await enrichMessageWithWebIntelligence(content, message.author.id, greetingInfo);
 
     try {
         console.log(`📩 [${message.channel.name || 'DM'}] ${message.author.tag}: ${finalContent}`);
 
         // Catat lifecycle Agent Run (Phase 2)
-        const authorDisplayName = message.author.displayName || message.author.globalName || message.author.username;
+        const authorDisplayName = greetingInfo.cleanNickname;
         agentRunId = await startAgentRun(
             message.author.id,
             null,
@@ -1059,10 +1121,10 @@ async function processBotRequest(message, content, isVoiceInput, existingTypingI
             user: {
                 id: message.author.id,
                 username: message.author.username,
-                displayName:
-                    message.author.displayName ||
-                    message.author.globalName ||
-                    message.author.username,
+                displayName: greetingInfo.cleanNickname,
+                callsign: greetingInfo.callsign,
+                preferredGreetingName: greetingInfo.preferredName,
+                hasCustomCallsign: greetingInfo.hasCustomCallsign,
             },
             userMemories: userMemories,
             guild: message.guild
@@ -1205,10 +1267,10 @@ async function processBotRequest(message, content, isVoiceInput, existingTypingI
         }
         if (error.name === 'TimeoutError') {
             console.error(`⏱️ Request ke n8n timeout setelah ${N8N_TIMEOUT_MS}ms`);
-            await message.reply('Aduh Bos, responnya lagi lambat banget nih dari otak AI. Boleh dicoba ketik ulang?').catch(() => {});
+            await message.reply(`Aduh ${greetingInfo.preferredName}, responnya lagi lambat banget nih dari otak AI. Boleh dicoba ketik ulang?`).catch(() => {});
         } else {
             console.error('❌ Gagal memproses pesan:', error.message);
-            await message.reply('Waduh, koneksi ke otak AI gue lagi ada kendala nih. Coba lagi bentar ya!').catch(() => {});
+            await message.reply(`Waduh ${greetingInfo.preferredName}, koneksi ke otak AI gue lagi ada kendala nih. Coba lagi bentar ya!`).catch(() => {});
         }
     } finally {
         clearInterval(typingInterval);
@@ -1260,17 +1322,22 @@ async function handleVoiceChannelAudio(userId, wavBuffer, guildId, textChannel =
             }
         }
 
+        const guild = client.guilds.cache.get(guildId);
+        const member = guild ? await guild.members.fetch(userId).catch(() => null) : null;
+        const author = member ? member.user : await client.users.fetch(userId).catch(() => null);
+        const greetingInfo = await resolveUserGreetingInfo(author || { id: userId, username: 'VoiceUser' }, member);
+
         // Catat lifecycle Agent Run (Phase 2)
         agentRunId = await startAgentRun(
             userId,
             null,
             cleanedText,
             { channel: textChannel ? textChannel.name : 'VoiceChannel', isVoiceInput: true, mode: 'VOICE_CHANNEL', guildId },
-            'Bos'
+            greetingInfo.cleanNickname
         ).catch(() => null);
 
         // Web Intelligence & Personal Analytics Context Injection untuk percakapan suara di Voice Channel
-        const enrichedVoiceContent = await enrichMessageWithWebIntelligence(cleanedText, userId);
+        const enrichedVoiceContent = await enrichMessageWithWebIntelligence(cleanedText, userId, greetingInfo);
 
         // Ambil memori aktif pengguna untuk konteks AI di VC
         const userMemories = await getRelevantMemories(userId, 8).catch(() => []);
@@ -1281,8 +1348,11 @@ async function handleVoiceChannelAudio(userId, wavBuffer, guildId, textChannel =
             agentRunId: agentRunId,
             user: {
                 id: userId,
-                username: 'VoiceUser',
-                displayName: 'Bos',
+                username: author ? author.username : 'VoiceUser',
+                displayName: greetingInfo.cleanNickname,
+                callsign: greetingInfo.callsign,
+                preferredGreetingName: greetingInfo.preferredName,
+                hasCustomCallsign: greetingInfo.hasCustomCallsign,
             },
             userMemories: userMemories,
             guild: { id: guildId },

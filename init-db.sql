@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS users (
     discord_user_id VARCHAR(64) UNIQUE NOT NULL,
     display_name VARCHAR(255),
     timezone VARCHAR(64) DEFAULT 'Asia/Jakarta',
-    callsign VARCHAR(64) DEFAULT 'Bos',
+    callsign VARCHAR(64) DEFAULT NULL,
     reminder_style VARCHAR(255) DEFAULT 'santai dan akrab',
     custom_instructions TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
