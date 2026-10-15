@@ -1,0 +1,53 @@
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: jarvis-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - TZ=${TZ:-Asia/Jakarta}
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: jarvis-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${DB_NAME:-jarvis}
+      - POSTGRES_USER=${DB_USER:-jarvis}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-jarvis_secure_pass_2026}
+      - TZ=${TZ:-Asia/Jakarta}
+    ports:
+      - "5433:5432"
+    volumes:
+      - jarvis_pgdata:/var/lib/postgresql/data
+
+  bot:
+    build:
+      context: ./discord-bot
+      dockerfile: Dockerfile
+    container_name: jarvis-bot
+    restart: unless-stopped
+    env_file:
+      - ./discord-bot/.env
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${DB_USER:-jarvis}
+      - DB_PASSWORD=${DB_PASSWORD:-jarvis_secure_pass_2026}
+      - DB_NAME=${DB_NAME:-jarvis}
+      - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL:-http://n8n:5678/webhook/jarvis-discord}
+      - TZ=${TZ:-Asia/Jakarta}
+    ports:
+      - "5001:5001"
+    depends_on:
+      - postgres
+      - n8n
+
+volumes:
+  n8n_data:
+  jarvis_pgdata:

@@ -1,0 +1,72 @@
+# ==============================================================================
+# JARVIS / AMBA REPOSITORY GITIGNORE (SECURITY HARDENED)
+# ==============================================================================
+
+# 1. Environment & Secret Variables (CRITICAL)
+.env
+.env.*
+*.env
+**/.env
+**/*.env
+!*.env.example
+!**/.env.example
+
+# 2. Private Keys, Certificates & Tokens
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
+*.pfx
+id_rsa*
+
+# 3. Dependencies
+node_modules/
+**/node_modules/
+package-lock.json.bak
+
+# 4. Logs & Diagnostics
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 5. Database Dumps & Real User Data (CRITICAL)
+backups/*.sql
+backups/*.sql.bak
+backups/*.dump
+backups/*.tar
+*.sql.bak
+*.db
+*.sqlite
+*.sqlite3
+!backups/.gitkeep
+
+# 6. Temporary Audio Files (CRITICAL - Voice Cache)
+discord-bot/temp_audio/*
+temp_audio/*
+*.mp3
+*.ogg
+*.wav
+*.m4a
+!discord-bot/temp_audio/.gitkeep
+!showcase_assets/**
+
+# 7. OS & Editor Artifacts
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# 8. Temporary Data, Scratchpads & Agent Brain Dumps
+scratch/
+tmp/
+temp/
+.system_generated/
+.gemini/

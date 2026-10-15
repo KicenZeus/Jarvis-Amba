@@ -1,0 +1,85 @@
+[
+  {
+    "id": "bK66XtBi87qeyr4o",
+    "name": "Jarvis Reminder Scheduler",
+    "active": true,
+    "nodes": [
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "minutes",
+                "minutesInterval": 1
+              }
+            ]
+          }
+        },
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, 0],
+        "id": "f1a2b3c4-d5e6-47a8-b9c0-1d2e3f4a5b6c",
+        "name": "Check Every Minute"
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "UPDATE reminders\nSET status = 'sent', sent_at = NOW(), snooze_until = NULL, last_triggered_at = NOW()\nWHERE id IN (\n    SELECT id FROM reminders\n    WHERE status = 'pending' AND (\n        (snooze_until IS NOT NULL AND snooze_until <= NOW())\n        OR (snooze_until IS NULL AND remind_at <= NOW())\n    )\n    FOR UPDATE SKIP LOCKED\n)\nRETURNING id, user_id, channel_id, title, repeat_rule;"
+        },
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [240, 0],
+        "id": "a2b3c4d5-e6f7-48a9-b0c1-2d3e4f5a6b7c",
+        "name": "Claim and Get Due Reminders",
+        "credentials": {
+          "postgres": {
+            "id": "lCnG06ZdKad78iGo",
+            "name": "Jarvis PostgreSQL"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://host.docker.internal:5001/api/notify",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={\n  \"channelId\": \"{{ $json.channel_id }}\",\n  \"text\": \"{{ $json.title }}\",\n  \"userId\": \"{{ $json.user_id }}\",\n  \"reminderId\": {{ $json.id }}\n}",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [480, 0],
+        "id": "b3c4d5e6-f7a8-49b0-c1d2-3e4f5a6b7c8d",
+        "name": "Notify Discord via Bot"
+      }
+    ],
+    "connections": {
+      "Check Every Minute": {
+        "main": [
+          [
+            {
+              "node": "Claim and Get Due Reminders",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Claim and Get Due Reminders": {
+        "main": [
+          [
+            {
+              "node": "Notify Discord via Bot",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1"
+    }
+  }
+]

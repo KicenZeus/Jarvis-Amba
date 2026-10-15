@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+*.env
+!*.env.example
+*.log
+temp_audio/*
+!temp_audio/.gitkeep
+*.mp3
+*.ogg
+*.wav
+*.m4a
