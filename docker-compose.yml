@@ -48,6 +48,14 @@ services:
       - postgres
       - n8n
 
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: jarvis-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://bot:5001
+    depends_on:
+      - bot
+
 volumes:
   n8n_data:
   jarvis_pgdata:

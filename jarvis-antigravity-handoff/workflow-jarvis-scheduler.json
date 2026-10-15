@@ -41,10 +41,10 @@
       {
         "parameters": {
           "method": "POST",
-          "url": "http://host.docker.internal:5001/api/notify",
+          "url": "http://bot:5001/api/notify",
           "sendBody": true,
           "specifyBody": "json",
-          "jsonBody": "={\n  \"channelId\": \"{{ $json.channel_id }}\",\n  \"text\": \"{{ $json.title }}\",\n  \"userId\": \"{{ $json.user_id }}\",\n  \"reminderId\": {{ $json.id }}\n}",
+          "jsonBody": "={{ JSON.stringify({ channelId: $json.channel_id, text: $json.title, userId: $json.user_id, reminderId: $json.id }) }}",
           "options": {}
         },
         "type": "n8n-nodes-base.httpRequest",

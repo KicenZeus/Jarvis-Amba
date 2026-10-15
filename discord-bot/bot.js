@@ -1,5 +1,6 @@
 require('dotenv').config();
 const http = require('http');
+const db = require('./db');
 const { Client, GatewayIntentBits, Events } = require('discord.js');
 const { downloadToBuffer, transcribeAudio, generateTTS, cleanupAudio } = require('./voiceService');
 const { joinVoice, leaveVoice, isInVoice, speakInVoice, interruptVoice, isSpeakingInVoice } = require('./vcManager');
@@ -75,6 +76,11 @@ const {
     getUserVoicePreference,
     setUserVoicePreference,
 } = require('./voicePreferenceService');
+const {
+    handleWebhookVerification,
+    handleWebhookEvent,
+    sendWhatsAppTextMessage,
+} = require('./whatsappAdapter');
 
 const N8N_WEBHOOK_URL =
     process.env.N8N_WEBHOOK_URL || 'http://localhost:5678/webhook/jarvis-discord';
@@ -1447,6 +1453,24 @@ const notifyServer = http.createServer(async (req, res) => {
                     return res.end(JSON.stringify({ error: 'channelId dan text wajib diisi' }));
                 }
 
+                // Support WhatsApp Channel Notifications (Phase 2)
+                if (String(data.channelId).startsWith('wa_')) {
+                    const waPhone = String(data.channelId).replace(/^wa_/, '');
+                    const waRes = await sendWhatsAppTextMessage(waPhone, data.text);
+                    if (!waRes.success) {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        return res.end(JSON.stringify({ error: waRes.error }));
+                    }
+                    if (data.reminderId) {
+                        handleRecurringReminder(data.reminderId).catch((err) =>
+                            console.error('⚠️ Gagal memproses recurring reminder WhatsApp:', err.message)
+                        );
+                    }
+                    console.log(`⏰ Notifikasi pengingat berhasil dikirim ke WhatsApp ${waPhone}`);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    return res.end(JSON.stringify({ success: true, channel: 'WHATSAPP' }));
+                }
+
                 const channel = await client.channels.fetch(data.channelId).catch(() => null);
                 if (!channel) {
                     res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -1473,10 +1497,27 @@ const notifyServer = http.createServer(async (req, res) => {
                 res.end(JSON.stringify({ error: err.message }));
             }
         });
-    } else {
-        res.writeHead(404);
-        res.end();
+        return;
     }
+
+    // 3. Endpoint Webhook WhatsApp Meta (Phase 1 & Phase 2)
+    if (req.url && req.url.startsWith('/webhook/whatsapp')) {
+        const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+        if (req.method === 'GET') {
+            return handleWebhookVerification(req, res, parsedUrl);
+        }
+        if (req.method === 'POST') {
+            let body = '';
+            req.on('data', (chunk) => (body += chunk));
+            req.on('end', async () => {
+                await handleWebhookEvent(req, res, body);
+            });
+            return;
+        }
+    }
+
+    res.writeHead(404);
+    res.end();
 });
 
 notifyServer.listen(NOTIFY_PORT, '0.0.0.0', () => {
