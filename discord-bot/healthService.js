@@ -123,6 +123,19 @@ function checkVoiceHealth() {
     };
 }
 
+function checkWhatsAppHealth() {
+    const hasToken = Boolean(process.env.WA_ACCESS_TOKEN);
+    const hasPhoneId = Boolean(process.env.WA_PHONE_NUMBER_ID);
+
+    return {
+        status: (hasToken && hasPhoneId) ? 'CONFIGURED' : 'NOT_CONFIGURED',
+        phoneNumberId: process.env.WA_PHONE_NUMBER_ID || null,
+        businessAccountId: process.env.WA_BUSINESS_ACCOUNT_ID || null,
+        mediaSupport: 'ENABLED',
+        voiceNoteSupport: 'ENABLED',
+    };
+}
+
 async function getCompleteHealthStatus(discordWsPing = null) {
     const [dbHealth, n8nHealth] = await Promise.all([
         checkDatabaseHealth(),
@@ -131,6 +144,7 @@ async function getCompleteHealthStatus(discordWsPing = null) {
 
     const sysHealth = checkSystemHealth();
     const voiceHealth = checkVoiceHealth();
+    const waHealth = checkWhatsAppHealth();
     const metricsSummary = metricsService.getMetricsSummary();
 
     let overallStatus = 'HEALTHY';
@@ -146,6 +160,7 @@ async function getCompleteHealthStatus(discordWsPing = null) {
         discordWsPing: discordWsPing !== null ? Math.round(discordWsPing) : null,
         database: dbHealth,
         n8n: n8nHealth,
+        whatsapp: waHealth,
         system: sysHealth,
         voice: voiceHealth,
         metrics: metricsSummary,
@@ -157,5 +172,6 @@ module.exports = {
     checkN8nHealth,
     checkSystemHealth,
     checkVoiceHealth,
+    checkWhatsAppHealth,
     getCompleteHealthStatus,
 };

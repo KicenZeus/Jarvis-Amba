@@ -44,9 +44,19 @@ echo.
 echo Menampilkan 10 log terakhir Discord Bot:
 docker logs --tail 10 jarvis-bot
 echo.
+echo.
 echo ===================================================================
-echo  Bot Amba sudah ONLINE di Discord!
-echo  Jendela ini boleh Anda tutup kapan saja (bot tetap jalan di background).
+echo  STATUS DUAL-CHANNEL (DISCORD & WHATSAPP):
+echo  - Discord Bot : ONLINE
+echo  - WhatsApp    : Memeriksa Cloudflare Webhook Tunnel...
+echo ===================================================================
+echo.
+timeout /t 3 /nobreak >nul
+node scripts/check-whatsapp.js
+
+echo ===================================================================
+echo  Jarvis Core siap digunakan!
+echo  Jendela ini boleh Anda tutup kapan saja (service tetap jalan di background).
 echo  Untuk mematikan, cukup jalankan stop-jarvis.bat atau via Docker Desktop.
 echo ===================================================================
 echo.

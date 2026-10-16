@@ -1,4 +1,5 @@
 const db = require('./db');
+const { sendSmartNotification } = require('./notificationService');
 
 /**
  * Format mata uang Rupiah
@@ -301,16 +302,23 @@ async function checkAndSendProactiveMessages(client) {
         );
 
         for (const u of briefingUsers.rows) {
-            const channel = await resolveProactiveChannel(client, u);
-            if (channel) {
-                const text = await getBriefingContent(u.id);
-                await channel.send(`<@${u.id}>\n${text}`).catch(() => {});
+            const text = await getBriefingContent(u.id);
+            const smartRes = await sendSmartNotification({
+                userId: u.id,
+                eventType: 'DAILY_BRIEFING',
+                text: text,
+                context: { channelId: u.briefing_channel_id },
+                discordClient: client,
+            });
+
+            if (smartRes.success) {
                 await db.query('UPDATE users SET last_briefing_date = CURRENT_DATE WHERE id = $1', [u.id]);
                 await db.query(
                     'INSERT INTO proactive_logs (user_id, type, channel_id, content, status) VALUES ($1, $2, $3, $4, $5)',
-                    [u.id, 'DAILY_BRIEFING', channel.id, text, 'SENT']
+                    [u.id, 'DAILY_BRIEFING', u.briefing_channel_id || 'SMART_ROUTED', text, 'SENT']
                 ).catch(() => {});
-                console.log(`☀️ Daily Briefing berhasil dikirim ke user ${u.display_name || u.id}`);
+                const channelsStr = smartRes.results.filter(r => r.success).map(r => r.channel).join(', ');
+                console.log(`☀️ Daily Briefing berhasil dikirim ke user ${u.display_name || u.id} via [${channelsStr}]`);
             }
         }
 
@@ -325,16 +333,23 @@ async function checkAndSendProactiveMessages(client) {
         );
 
         for (const u of recapUsers.rows) {
-            const channel = await resolveProactiveChannel(client, u);
-            if (channel) {
-                const text = await getRecapContent(u.id);
-                await channel.send(`<@${u.id}>\n${text}`).catch(() => {});
+            const text = await getRecapContent(u.id);
+            const smartRes = await sendSmartNotification({
+                userId: u.id,
+                eventType: 'DAILY_RECAP',
+                text: text,
+                context: { channelId: u.briefing_channel_id },
+                discordClient: client,
+            });
+
+            if (smartRes.success) {
                 await db.query('UPDATE users SET last_recap_date = CURRENT_DATE WHERE id = $1', [u.id]);
                 await db.query(
                     'INSERT INTO proactive_logs (user_id, type, channel_id, content, status) VALUES ($1, $2, $3, $4, $5)',
-                    [u.id, 'DAILY_RECAP', channel.id, text, 'SENT']
+                    [u.id, 'DAILY_RECAP', u.briefing_channel_id || 'SMART_ROUTED', text, 'SENT']
                 ).catch(() => {});
-                console.log(`📊 Daily Recap berhasil dikirim ke user ${u.display_name || u.id}`);
+                const channelsStr = smartRes.results.filter(r => r.success).map(r => r.channel).join(', ');
+                console.log(`📊 Daily Recap berhasil dikirim ke user ${u.display_name || u.id} via [${channelsStr}]`);
             }
         }
 
@@ -351,9 +366,15 @@ async function checkAndSendProactiveMessages(client) {
         );
 
         for (const r of snoozed.rows) {
-            const ch = await client.channels.fetch(r.channel_id).catch(() => null);
-            if (ch) {
-                await ch.send(`⏰ <@${r.user_id}> **[Snooze Berakhir]:** ${r.title}`).catch(() => {});
+            const text = `⏰ **[Snooze Berakhir]:** ${r.title}`;
+            const smartRes = await sendSmartNotification({
+                userId: r.user_id,
+                eventType: 'REMINDER',
+                text: text,
+                context: { channelId: r.channel_id, reminderId: r.id },
+                discordClient: client,
+            });
+            if (smartRes.success) {
                 console.log(`⏰ Pengingat snooze #${r.id} berhasil terpicu kembali.`);
             }
         }

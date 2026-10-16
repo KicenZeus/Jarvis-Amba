@@ -70,21 +70,40 @@ Amba kini terhubung langsung ke internet secara real-time untuk mengambil inform
 ## 0. Cara Menyalakan & Menjalankan Bot (All-in-One Docker) 🐳
 
 Kini seluruh ekosistem Jarvis telah disatukan ke dalam **Docker Compose**:
-1. **`jarvis-postgres`**: Database PostgreSQL persisten untuk tasks, reminders, memories, dan catatan.
+1. **`jarvis-postgres`**: Database PostgreSQL persisten untuk tasks, reminders, memories, identity mapping, dan catatan.
 2. **`jarvis-n8n`**: Engine automasi AI yang menghubungkan model Gemini dan cron scheduler.
-3. **`jarvis-bot`**: Bot Discord Amba (Voice Channel, HD Audio Player, Speech-to-Text & Text-to-Speech).
+3. **`jarvis-bot`**: Dual-channel bot runtime (Discord Gateway + HTTP Listener & WhatsApp Adapter).
+4. **`jarvis-tunnel`**: Cloudflare Tunnel resmi untuk mengamankan dan mengekspos Webhook WhatsApp Meta Cloud API ke publik.
+
+---
+
+### Perbedaan Mekanisme Koneksi: Discord vs WhatsApp
+- **Discord:** Bekerja melalui koneksi **outbound WebSocket** langsung dari container bot ke server Discord. Saat Docker dijalankan ulang, bot langsung online otomatis tanpa konfigurasi URL apapun.
+- **WhatsApp:** Bekerja melalui **inbound Webhook** dari Meta Cloud API. Meta mengirim request HTTP POST ke server lokal melalui domain publik Cloudflare Tunnel (`jarvis-tunnel`).
 
 ---
 
 ### Metode 1: Paling Praktis (Sekali Klik) — *Rekomendasi* ⭐
 
-Bos sudah disediakan file launcher otomatis. Cukup buka folder project:
+Bos sudah disediakan file launcher otomatis di folder project:
 `D:\Dev\project\n8n\Jarvis`
 
-1. **Buka Docker Desktop di Windows** (pastikan ikon paus di taskbar Windows sudah aktif).
+1. **Buka Docker Desktop di Windows** (pastikan ikon paus di taskbar sudah aktif).
 2. **Double-click file `start-jarvis.bat`**.
-3. Script otomatis menyalakan seluruh container (`docker compose up -d`) dan menampilkan status aktif.
-4. **Jendela CMD boleh langsung Anda tutup**! Karena bot dan semua sistem sudah berjalan di latar belakang (*background container*) Docker!
+3. Script otomatis:
+   - Menyalakan seluruh container (`docker compose up -d`).
+   - Memeriksa koneksi Discord Bot (`jarvis-bot`).
+   - Membaca URL Webhook WhatsApp aktif dari `jarvis-tunnel` dan menguji statusnya.
+4. **Periksa URL Webhook WhatsApp:**
+   Jika URL berubah setelah restart Docker, script akan menampilkan URL Callback baru yang perlu dimasukkan ke Meta App Dashboard.
+5. **Jendela CMD boleh langsung Anda tutup**! Karena bot dan semua sistem tetap berjalan di latar belakang (*background container*) Docker!
+
+---
+
+### Cara Cek URL Webhook WhatsApp Kapan Saja
+Jika ingin mengecek status dan URL Webhook WhatsApp tanpa perlu merestart bot:
+- **Sekali Klik:** Double-click file **`check-whatsapp-url.bat`** di folder project.
+- **Via Terminal:** Jalankan `node scripts/check-whatsapp.js`.
 
 ---
 
@@ -101,10 +120,13 @@ Bos sudah disediakan file launcher otomatis. Cukup buka folder project:
 
 Cukup buka terminal di folder project (`D:\Dev\project\n8n\Jarvis`):
 ```bash
-# Menyalakan seluruh sistem (Postgres, n8n, dan Bot Discord):
+# Menyalakan seluruh sistem (Postgres, n8n, Bot, dan WhatsApp Tunnel):
 docker compose up -d
 
-# Melihat log bot Discord realtime:
+# Mengecek status dan URL Webhook WhatsApp:
+node scripts/check-whatsapp.js
+
+# Melihat log bot realtime:
 docker logs -f jarvis-bot
 
 # Mematikan seluruh sistem:
@@ -123,9 +145,12 @@ Jika semua berjalan normal, saat mengecek log bot (`docker logs jarvis-bot`):
 🌐 Allowlist kosong: bot merespons semua user.
 ⏰ Proactive Scheduler (Daily Briefing & Recap) diaktifkan.
 ```
-Dan di Discord:
-- Status bot **Amba#2138** akan berubah menjadi **Online (Hijau)**.
-- Bot langsung siap menerima perintah chat, voice note, musik, maupun obrolan voice channel!
+Dan saat mengecek WhatsApp status (`check-whatsapp-url.bat`):
+```text
+🔗 URL Callback    : https://<subdomain>.trycloudflare.com/webhook/whatsapp
+🔑 Token Verifikasi: jarvis_amba_wa_secret_2026
+✅ Webhook Endpoint: ONLINE & VALID! (Respon 200 OK)
+```
 
 ---
 
@@ -142,6 +167,8 @@ Dan di Discord:
 | Kendala | Penyebab | Solusi |
 | :--- | :--- | :--- |
 | **"Docker Engine belum berjalan"** | Aplikasi Docker Desktop belum dibuka | Buka aplikasi Docker Desktop di Windows terlebih dahulu hingga statusnya *Engine running*, lalu jalankan `start-jarvis.bat`. |
+| **Bot online di Discord tapi tidak merespon di WhatsApp** | URL Webhook Cloudflare Tunnel berubah setelah Docker di-restart | Jalankan `check-whatsapp-url.bat` untuk melihat URL aktif baru, lalu perbarui **URL Callback** di Meta Developer Dashboard (*WhatsApp -> Konfigurasi -> Bagian Webhook -> Edit & Simpan*). |
+| **Error 190 (Authentication Error) di WhatsApp** | Token Meta kedaluwarsa atau belum dimuat | Pastikan token permanent System User terisi di `.env`, lalu jalankan `docker compose up -d --build bot`. |
 | **Bot offline di Discord** | Container `jarvis-bot` belum aktif | Buka Docker Desktop dan klik tombol Play pada `jarvis-bot`, atau jalankan `start-jarvis.bat`. |
 | **Ingin melihat log bot** | Bot jalan di background | Jalankan perintah `docker logs -f jarvis-bot` di terminal untuk melihat aktivitas log realtime. |
 | **Auto-Start saat PC menyala** | Ingin bot otomatis aktif saat Windows booting | Pastikan di pengaturan Docker Desktop: *Settings -> General -> Start Docker Desktop when you sign in* dicentang. Container Jarvis akan otomatis langsung nyala! |
@@ -465,6 +492,18 @@ Ketik **`!ping`**, **`!health`**, atau **`!status`** untuk memunculkan kartu sta
 - Tersedia script praktis di folder `backups/`:
   - **`backups\backup-db.bat`**: Membuat snapshot cadangan instan seluruh database PostgreSQL dengan penamaan timestamp (contoh: `backup_jarvis_20261015_103000.sql`).
   - **`backups\restore-db.bat <file.sql>`**: Memulihkan database dari snapshot cadangan yang dipilih dengan konfirmasi keamanan.
+
+---
+
+### O. Fitur Broadcast & Pengumuman Massal Serentak (WhatsApp & Discord)
+Bos (Owner) atau Admin kini bisa menyiarkan pesan pengumuman penting secara serentak ke seluruh pengguna terdaftar:
+- **Dari WhatsApp:** Chat ke nomor bot `!broadcast <pesan>` atau `amba broadcast: <pesan>` (atau `!broadcast wa <pesan>` / `!broadcast discord <pesan>`).
+- **Dari Discord:** Ketik `!broadcast <pesan>` atau `!broadcast all <pesan>` di channel atau DM bot.
+- **Dari PC Sekali Klik:** Double-click file **`broadcast.bat`** di folder project `D:\Dev\project\n8n\Jarvis` untuk mengirim pesan interaktif langsung dari desktop!
+- Amba otomatis memformat pesan secara personal ke tiap pengguna:
+  `📢 [PENGUMUMAN JARVIS AMBA]`
+  `Halo <Nama Pengguna>!`
+  `...`
 
 ---
 

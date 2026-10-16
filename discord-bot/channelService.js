@@ -129,7 +129,7 @@ async function linkUserChannel(userId, channelType, externalUserId, details = {}
  * Idempotency Check & Logging
  * Memastikan pesan webhook tidak diproses ganda akibat network retry dari platform Meta/Discord
  */
-async function checkAndRecordInboundMessage(channelType, externalMessageId, userId = null, rawPayload = null) {
+async function checkAndRecordInboundMessage(channelType, externalMessageId, userId = null, rawPayload = null, messageType = 'TEXT', content = null) {
     if (!channelType || !externalMessageId) {
         return { isDuplicate: false, messageId: null };
     }
@@ -139,11 +139,11 @@ async function checkAndRecordInboundMessage(channelType, externalMessageId, user
     try {
         const res = await db.query(
             `INSERT INTO channel_messages (
-                user_id, channel_type, external_message_id, direction, status, payload_hash, created_at
-             ) VALUES ($1, $2, $3, 'INBOUND', 'PROCESSING', $4, NOW())
+                user_id, channel_type, external_message_id, direction, message_type, content, status, payload_hash, created_at
+             ) VALUES ($1, $2, $3, 'INBOUND', $4, $5, 'PROCESSING', $6, NOW())
              ON CONFLICT (channel_type, external_message_id) DO NOTHING
              RETURNING id, status;`,
-            [userId, channelType.toUpperCase(), String(externalMessageId).trim(), payloadHash]
+            [userId, channelType.toUpperCase(), String(externalMessageId).trim(), String(messageType).toUpperCase(), content, payloadHash]
         );
 
         if (res.rows.length === 0) {
@@ -162,14 +162,23 @@ async function checkAndRecordInboundMessage(channelType, externalMessageId, user
 /**
  * Memperbarui status pemrosesan channel message
  */
-async function updateMessageStatus(channelType, externalMessageId, status) {
+async function updateMessageStatus(channelType, externalMessageId, status, content = null) {
     try {
-        await db.query(
-            `UPDATE channel_messages 
-             SET status = $1, processed_at = NOW() 
-             WHERE channel_type = $2 AND external_message_id = $3;`,
-            [status, channelType.toUpperCase(), String(externalMessageId).trim()]
-        );
+        if (content) {
+            await db.query(
+                `UPDATE channel_messages 
+                 SET status = $1, content = $2, processed_at = NOW() 
+                 WHERE channel_type = $3 AND external_message_id = $4;`,
+                [status, content, channelType.toUpperCase(), String(externalMessageId).trim()]
+            );
+        } else {
+            await db.query(
+                `UPDATE channel_messages 
+                 SET status = $1, processed_at = NOW() 
+                 WHERE channel_type = $2 AND external_message_id = $3;`,
+                [status, channelType.toUpperCase(), String(externalMessageId).trim()]
+            );
+        }
     } catch (err) {
         console.warn('⚠️ [ChannelService] Gagal update status pesan:', err.message);
     }

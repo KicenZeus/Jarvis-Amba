@@ -80,7 +80,14 @@ const {
     handleWebhookVerification,
     handleWebhookEvent,
     sendWhatsAppTextMessage,
+    sendWhatsAppAudioMessage,
 } = require('./whatsappAdapter');
+const {
+    sendSmartNotification,
+    getUserNotificationPreferences,
+    setNotificationPreference,
+} = require('./notificationService');
+const { broadcastMessage, isAuthorizedAdmin, setDiscordClient } = require('./broadcastService');
 
 const N8N_WEBHOOK_URL =
     process.env.N8N_WEBHOOK_URL || 'http://localhost:5678/webhook/jarvis-discord';
@@ -107,12 +114,12 @@ client.once(Events.ClientReady, (readyClient) => {
     } else {
         console.log('🌐 Allowlist kosong: bot merespons semua user.');
     }
+    // Set global client untuk pengiriman broadcast & proaktif
+    setDiscordClient(readyClient);
     // Aktifkan scheduler proaktif (Daily Briefing, Daily Recap, Recurring & Snooze)
     startProactiveScheduler(readyClient);
 });
 
-/**
- * Mengecek apakah pesan ditujukan untuk bot:
 /**
  * Mengecek apakah sebuah teks mengandung pemicu bot (kata "amba", "jarvis", mention, atau command prefix)
  */
@@ -121,8 +128,8 @@ function containsBotTrigger(text, botId = null) {
     if (botId && (text.includes(`<@${botId}>`) || text.includes(`<@!${botId}>`))) {
         return true;
     }
-    // Kata "amba", "ambah", "mba", "maba", "hamba", atau "jarvis" di mana saja dalam kalimat, atau prefix !amba, /amba, atau command musik, VC, memori, proaktif, suara, web, analitik, keamanan, dan diagnostik kesehatan
-    const regex = /(\b(amba|ambah|mba|maba|hamba|jarvis)\b|^!(amba|jarvis|j|join|leave|vc|dc|play|p|pause|resume|unpause|skip|s|stop|queue|q|vol|v|volume|help|h|panduan|bantuan|mhelp|ahelp|memories|memori|ingatan|forget|lupakan|briefing|recap|snooze|voice|suara|diam|search|cari|cuaca|weather|baca|rangkum|analytics|analisis|stats|insight|role|myrole|audit|auditlog|security|safety|ping|health|status|diagnostik)\b|^\/(amba|jarvis)\b)/i;
+    // Kata "amba", "ambah", "mba", "maba", "hamba", atau "jarvis" di mana saja dalam kalimat, atau prefix !amba, /amba, atau command musik, VC, memori, proaktif, suara, web, analitik, keamanan, diagnostik, broadcast, dan notifikasi
+    const regex = /(\b(amba|ambah|mba|maba|hamba|jarvis)\b|^!(amba|jarvis|j|join|leave|vc|dc|play|p|pause|resume|unpause|skip|s|stop|queue|q|vol|v|volume|help|h|panduan|bantuan|mhelp|ahelp|memories|memori|ingatan|forget|lupakan|briefing|recap|snooze|voice|suara|diam|search|cari|cuaca|weather|baca|rangkum|analytics|analisis|stats|insight|role|myrole|audit|auditlog|security|safety|ping|health|status|diagnostik|broadcast|pengumuman|siarkan|notif|notifikasi)\b|^\/(amba|jarvis)\b)/i;
     return regex.test(text);
 }
 
@@ -548,6 +555,100 @@ client.on(Events.MessageCreate, async (message) => {
                 return message.reply(`Siap ${preferredName}! Daily Recap malam otomatis telah **dinonaktifkan**.`);
             } catch (err) {
                 return message.reply(`⚠️ Gagal mengatur recap: ${err.message}`);
+            }
+        }
+
+        // 5. Pengaturan Notifikasi Proaktif (Phase 6: Discord & WhatsApp)
+        if (/^(!notif|!notifikasi|notifikasi|pengaturan\s*notifikasi|cek\s*notifikasi)$/i.test(cleanedContent || rawText)) {
+            try {
+                const prefs = await getUserNotificationPreferences(message.author.id);
+                let text = `🔔 **Pengaturan Notifikasi Proaktif Jarvis (${preferredName}):**\n\n`;
+
+                const getPrefBadge = (type) => {
+                    const p = prefs.find((item) => item.event_type === type);
+                    if (!p) return '`BOTH` (Discord & WhatsApp - Default)';
+                    if (!p.enabled) return '🔴 Nonaktif';
+                    return `🟢 \`${p.channel_type}\``;
+                };
+
+                text += `• **Pengingat (Reminders):** ${getPrefBadge('REMINDER')}\n`;
+                text += `• **Daily Briefing (Pagi):** ${getPrefBadge('DAILY_BRIEFING')}\n`;
+                text += `• **Daily Recap (Malam):** ${getPrefBadge('DAILY_RECAP')}\n`;
+                text += `• **Task Due (Tugas):** ${getPrefBadge('TASK_DUE')}\n\n`;
+
+                const anyQuiet = prefs.find((p) => p.quiet_hours_start && p.quiet_hours_end);
+                if (anyQuiet) {
+                    text += `🌙 **Jam Tenang (Quiet Hours):** \`${String(anyQuiet.quiet_hours_start).substring(0, 5)} - ${String(anyQuiet.quiet_hours_end).substring(0, 5)} WIB\`\n\n`;
+                } else {
+                    text += `🌙 **Jam Tenang (Quiet Hours):** Belum diatur (aktif 24 jam)\n\n`;
+                }
+
+                text += `💡 *Cara ubah channel:* \`!notif atur reminder whatsapp\` atau \`!notif atur briefing both\`\n`;
+                text += `💡 *Cara atur jam tenang:* \`!notif jam-tenang 22:00 07:00\``;
+
+                return message.reply(text);
+            } catch (err) {
+                return message.reply(`⚠️ Gagal mengambil preferensi notifikasi: ${err.message}`);
+            }
+        }
+
+        const aturNotifMatch = (cleanedContent || rawText).match(/^!notif\s+atur\s+(reminder|briefing|recap|task)\s+(discord|whatsapp|wa|both|keduanya)$/i);
+        if (aturNotifMatch) {
+            try {
+                let eventType = aturNotifMatch[1].toUpperCase();
+                if (eventType === 'BRIEFING') eventType = 'DAILY_BRIEFING';
+                if (eventType === 'RECAP') eventType = 'DAILY_RECAP';
+                if (eventType === 'TASK') eventType = 'TASK_DUE';
+
+                let targetChannel = aturNotifMatch[2].toUpperCase();
+                if (targetChannel === 'WA') targetChannel = 'WHATSAPP';
+                if (targetChannel === 'KEDUANYA') targetChannel = 'BOTH';
+
+                await setNotificationPreference(message.author.id, eventType, targetChannel, true);
+                return message.reply(`✅ Siap ${preferredName}! Notifikasi **${eventType}** kini akan dikirimkan ke **${targetChannel}**.`);
+            } catch (err) {
+                return message.reply(`⚠️ Gagal mengubah preferensi: ${err.message}`);
+            }
+        }
+
+        const jamTenangMatch = (cleanedContent || rawText).match(/^!notif\s+jam-tenang\s+(\d{1,2}:\d{2})\s+(\d{1,2}:\d{2})$/i);
+        if (jamTenangMatch) {
+            try {
+                const startTime = jamTenangMatch[1];
+                const endTime = jamTenangMatch[2];
+                await setNotificationPreference(message.author.id, 'REMINDER', 'BOTH', true, startTime, endTime);
+                await setNotificationPreference(message.author.id, 'DAILY_BRIEFING', 'BOTH', true, startTime, endTime);
+                await setNotificationPreference(message.author.id, 'DAILY_RECAP', 'BOTH', true, startTime, endTime);
+                return message.reply(`🌙 Siap ${preferredName}! Jam Tenang telah diatur dari pukul **${startTime}** sampai **${endTime} WIB**. Pada jam tersebut, Jarvis tidak akan mengirimkan notifikasi.`);
+            } catch (err) {
+                return message.reply(`⚠️ Gagal mengatur jam tenang: ${err.message}`);
+            }
+        }
+
+        // 6. Broadcast Serentak ke Seluruh Pengguna (Khusus Admin / Owner)
+        const broadcastMatch = (cleanedContent || rawText).match(/^!(?:broadcast|pengumuman|siarkan)(?:\s+(all|wa|whatsapp|discord))?\s+([\s\S]+)$/i);
+        if (broadcastMatch) {
+            const isAuth = await isAuthorizedAdmin(message.author.id);
+            if (!isAuth) {
+                return message.reply(`⛔ Maaf ${preferredName}, fitur broadcast hanya dapat digunakan oleh **Owner** atau **Admin** Jarvis!`);
+            }
+
+            let target = (broadcastMatch[1] || 'ALL').toUpperCase();
+            if (target === 'WA') target = 'WHATSAPP';
+            const bMessage = broadcastMatch[2].trim();
+
+            const statusMsg = await message.reply(`📢 Memulai pengiriman broadcast ke seluruh pengguna terdaftar (Target: **${target}**)...`);
+            const bRes = await broadcastMessage({
+                message: bMessage,
+                targetChannel: target,
+                senderUserId: message.author.id,
+                discordClient: client,
+            });
+
+            if (bRes.success) {
+                return statusMsg.edit(`✅ **Broadcast Selesai Terkirim!**\n• Target Channel: \`${target}\`\n• Berhasil: **${bRes.delivered}** pengguna\n• Gagal: **${bRes.failed}** pengguna\n• Total Terdaftar: **${bRes.total}** akun`);
+            } else {
+                return statusMsg.edit(`❌ Gagal mengirim broadcast: ${bRes.error}`);
             }
         }
 
@@ -1453,44 +1554,31 @@ const notifyServer = http.createServer(async (req, res) => {
                     return res.end(JSON.stringify({ error: 'channelId dan text wajib diisi' }));
                 }
 
-                // Support WhatsApp Channel Notifications (Phase 2)
-                if (String(data.channelId).startsWith('wa_')) {
-                    const waPhone = String(data.channelId).replace(/^wa_/, '');
-                    const waRes = await sendWhatsAppTextMessage(waPhone, data.text);
-                    if (!waRes.success) {
-                        res.writeHead(500, { 'Content-Type': 'application/json' });
-                        return res.end(JSON.stringify({ error: waRes.error }));
-                    }
-                    if (data.reminderId) {
-                        handleRecurringReminder(data.reminderId).catch((err) =>
-                            console.error('⚠️ Gagal memproses recurring reminder WhatsApp:', err.message)
-                        );
-                    }
-                    console.log(`⏰ Notifikasi pengingat berhasil dikirim ke WhatsApp ${waPhone}`);
-                    res.writeHead(200, { 'Content-Type': 'application/json' });
-                    return res.end(JSON.stringify({ success: true, channel: 'WHATSAPP' }));
-                }
+                // Smart Multi-Channel Notification Router (Phase 6)
+                const notifRes = await sendSmartNotification({
+                    userId: data.userId,
+                    eventType: 'REMINDER',
+                    text: data.text,
+                    context: { channelId: data.channelId, reminderId: data.reminderId },
+                    discordClient: client,
+                });
 
-                const channel = await client.channels.fetch(data.channelId).catch(() => null);
-                if (!channel) {
-                    res.writeHead(404, { 'Content-Type': 'application/json' });
-                    return res.end(JSON.stringify({ error: 'Channel Discord tidak ditemukan' }));
-                }
-
-                const mention = data.userId ? `<@${data.userId}> ` : '';
-                const finalMessage = data.text.startsWith('<@') ? data.text : `${mention}${data.text}`;
-                await channel.send(finalMessage);
-
-                // Recurring reminder handling (Phase 3)
                 if (data.reminderId) {
                     handleRecurringReminder(data.reminderId).catch((err) =>
                         console.error('⚠️ Gagal memproses recurring reminder:', err.message)
                     );
                 }
 
-                console.log(`⏰ Notifikasi pengingat berhasil dikirim ke #${channel.name || 'channel'}`);
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ success: true }));
+                if (notifRes.success) {
+                    const deliveredChannels = notifRes.results.filter(r => r.success).map(r => r.channel);
+                    console.log(`⏰ Notifikasi pengingat #${data.reminderId || ''} berhasil dikirim via [${deliveredChannels.join(', ')}]`);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    return res.end(JSON.stringify({ success: true, channels: deliveredChannels }));
+                } else {
+                    console.log(`ℹ️ [Notification] Pengingat #${data.reminderId || ''} tidak terkirim: ${notifRes.reason}`);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    return res.end(JSON.stringify({ success: false, reason: notifRes.reason }));
+                }
             } catch (err) {
                 console.error('❌ Gagal mengirim notifikasi pengingat:', err.message);
                 res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -1500,7 +1588,36 @@ const notifyServer = http.createServer(async (req, res) => {
         return;
     }
 
-    // 3. Endpoint Webhook WhatsApp Meta (Phase 1 & Phase 2)
+    // 3. Endpoint Broadcast Serentak (Multi-Channel Announcement)
+    if (req.method === 'POST' && req.url === '/api/broadcast') {
+        let body = '';
+        req.on('data', (chunk) => (body += chunk));
+        req.on('end', async () => {
+            try {
+                const data = JSON.parse(body);
+                if (!data.message || !data.message.trim()) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    return res.end(JSON.stringify({ error: 'message wajib diisi' }));
+                }
+
+                const result = await broadcastMessage({
+                    message: data.message,
+                    targetChannel: data.target || data.channel || 'ALL',
+                    senderUserId: data.userId || null,
+                    discordClient: client,
+                });
+
+                res.writeHead(result.success ? 200 : 403, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify(result));
+            } catch (err) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: err.message }));
+            }
+        });
+        return;
+    }
+
+    // 4. Endpoint Webhook WhatsApp Meta (Phase 1 & Phase 2)
     if (req.url && req.url.startsWith('/webhook/whatsapp')) {
         const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
         if (req.method === 'GET') {

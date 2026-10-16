@@ -189,9 +189,75 @@ function cleanupAudio(filePath) {
     }
 }
 
+/**
+ * Analisis Gambar menggunakan Google Gemini Vision API (gemini-flash-lite-latest)
+ * @param {Buffer} imageBuffer Buffer gambar (jpg, png, webp)
+ * @param {string} mimeType Mime type gambar (contoh: 'image/jpeg', 'image/png')
+ * @param {string} caption Pesan / caption yang disertakan user bersama gambar
+ * @param {string} apiKey Gemini API Key
+ * @returns {Promise<string>} Deskripsi / jawaban teks hasil analisis gambar
+ */
+async function analyzeImage(imageBuffer, mimeType, caption = '', apiKey, retries = 2) {
+    if (!apiKey) {
+        throw new Error('GEMINI_API_KEY tidak ditemukan di environment variable.');
+    }
+
+    const cleanMime = mimeType ? mimeType.split(';')[0].trim().toLowerCase() : 'image/jpeg';
+    const base64Image = imageBuffer.toString('base64');
+    const promptText = caption && caption.trim()
+        ? `Pengguna mengirim gambar ini dengan pesan/pertanyaan: "${caption}". Tolong amati gambar ini secara seksama dan jawab pertanyaan pengguna atau jelaskan isi gambar secara akurat, santai, ramah, dan solutif dalam Bahasa Indonesia.`
+        : `Tolong jelaskan secara jelas, informatif, dan ringkas apa yang ada di dalam gambar ini dalam Bahasa Indonesia. Jika ada teks, tabel, atau objek penting, sebutkan intisarinya.`;
+
+    const requestData = JSON.stringify({
+        contents: [
+            {
+                parts: [
+                    {
+                        inline_data: {
+                            mime_type: cleanMime,
+                            data: base64Image,
+                        },
+                    },
+                    {
+                        text: promptText,
+                    },
+                ],
+            },
+        ],
+    });
+
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const res = await fetch(
+                `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key=${apiKey}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: requestData,
+                    signal: AbortSignal.timeout(20000),
+                }
+            );
+
+            if (!res.ok) {
+                const errJson = await res.json().catch(() => null);
+                throw new Error(errJson?.error?.message || `HTTP ${res.status}`);
+            }
+
+            const parsed = await res.json();
+            return parsed.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+        } catch (err) {
+            if (attempt === retries) throw err;
+            console.warn(`⚠️ Percobaan ke-${attempt} Analisis Gambar gagal (${err.message}), mencoba ulang...`);
+            await new Promise((r) => setTimeout(r, 1000));
+        }
+    }
+}
+
 module.exports = {
     downloadToBuffer,
     transcribeAudio,
+    analyzeImage,
     generateTTS,
     cleanupAudio,
 };
+
