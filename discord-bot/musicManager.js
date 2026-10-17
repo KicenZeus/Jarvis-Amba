@@ -10,6 +10,11 @@ const {
     resolveSoundCloudUrl,
     getAudioStreamFromTranscodings,
 } = require('./soundcloudService');
+const {
+    searchYouTubeMusic,
+    resolveYouTubeUrl,
+    getAudioStreamFromYouTube,
+} = require('./youtubeMusicService');
 const { resolveExternalMusicUrl } = require('./urlResolver');
 
 // Map untuk mengelola antrean musik per server:
@@ -85,12 +90,17 @@ async function playNextTrack(guildId) {
             resource = createAudioResource(nextTrack.streamUrl, {
                 inlineVolume: true,
             });
-        } else if (nextTrack.transcodings && nextTrack.transcodings.length > 0) {
-            const { stream, destroy } = await getAudioStreamFromTranscodings(nextTrack.transcodings);
+        } else if (nextTrack.isYouTube) {
+            const { stream, destroy } = await getAudioStreamFromYouTube(nextTrack.url, state.volume);
             state.currentStreamDestroy = destroy;
             resource = createAudioResource(stream, {
-                inputType: StreamType.Raw,
-                inlineVolume: true,
+                inputType: StreamType.OggOpus,
+            });
+        } else if (nextTrack.transcodings && nextTrack.transcodings.length > 0) {
+            const { stream, destroy } = await getAudioStreamFromTranscodings(nextTrack.transcodings, state.volume);
+            state.currentStreamDestroy = destroy;
+            resource = createAudioResource(stream, {
+                inputType: StreamType.OggOpus,
             });
         } else {
             throw new Error('Informasi format audio tidak ditemukan.');
@@ -151,8 +161,22 @@ async function playMusic(voiceChannel, textChannel, query, user) {
             duration: 'Live Stream',
             requestedBy: user.displayName || user.username || 'Teman',
         };
+    } else if (/https?:\/\/(www\.)?(youtube\.com\/(watch\?v=|shorts\/)|youtu\.be\/)/i.test(query.trim())) {
+        // 2. Link YouTube langsung
+        try {
+            const ytInfo = await resolveYouTubeUrl(query.trim());
+            track = {
+                title: ytInfo.title,
+                url: ytInfo.url,
+                duration: ytInfo.duration,
+                isYouTube: true,
+                requestedBy: user.displayName || user.username || 'Teman',
+            };
+        } catch (err) {
+            console.warn('⚠️ Gagal resolve direct YouTube URL, mencoba via pencarian:', err.message);
+        }
     } else if (query.includes('soundcloud.com/')) {
-        // 2. Link SoundCloud langsung
+        // 3. Link SoundCloud langsung
         const info = await resolveSoundCloudUrl(query);
         track = {
             title: info.title,
@@ -161,8 +185,10 @@ async function playMusic(voiceChannel, textChannel, query, user) {
             transcodings: info.transcodings,
             requestedBy: user.displayName || user.username || 'Teman',
         };
-    } else {
-        // 3. Cek apakah link YouTube atau Spotify
+    }
+
+    if (!track) {
+        // 4. Query pencarian judul atau link Spotify
         let searchQuery = query;
         let sourceTag = null;
         let displayTitle = null;
@@ -173,24 +199,43 @@ async function playMusic(voiceChannel, textChannel, query, user) {
             sourceTag = ext.source;
             displayTitle = ext.displayTitle;
             if (textChannel) {
-                textChannel.send(`🔗 Mendeteksi tautan **${ext.source}**: *${ext.displayTitle}*. Mencari audio terbaik...`).catch(() => {});
+                textChannel.send(`🔗 Mendeteksi tautan **${ext.source}**: *${ext.displayTitle}*. Mencari versi original terbaik...`).catch(() => {});
             }
         }
 
-        // Cari lagu di engine audio berdasarkan judul/kata kunci
-        const searchResults = await searchSoundCloud(searchQuery);
-        if (!searchResults || searchResults.length === 0) {
-            throw new Error(`Lagu "${displayTitle || query}" tidak ditemukan.`);
+        // Cari lagu di YouTube Music lebih dulu (Originality & Quality Prioritized)
+        try {
+            const ytResults = await searchYouTubeMusic(searchQuery);
+            if (ytResults && ytResults.length > 0) {
+                const top = ytResults[0];
+                track = {
+                    title: displayTitle ? `${displayTitle} [${sourceTag}]` : top.title,
+                    url: top.url,
+                    duration: top.duration,
+                    isYouTube: true,
+                    requestedBy: user.displayName || user.username || 'Teman',
+                };
+            }
+        } catch (ytErr) {
+            console.warn(`⚠️ YouTube search error: ${ytErr.message}. Fallback ke SoundCloud...`);
         }
 
-        const top = searchResults[0];
-        track = {
-            title: displayTitle ? `${displayTitle} [${sourceTag}]` : top.title,
-            url: (ext && ext.originalUrl) || top.url,
-            duration: top.duration,
-            transcodings: top.transcodings,
-            requestedBy: user.displayName || user.username || 'Teman',
-        };
+        // Fallback ke SoundCloud jika YouTube tidak menghasilkan hasil
+        if (!track) {
+            const searchResults = await searchSoundCloud(searchQuery);
+            if (!searchResults || searchResults.length === 0) {
+                throw new Error(`Lagu "${displayTitle || query}" tidak ditemukan.`);
+            }
+
+            const top = searchResults[0];
+            track = {
+                title: displayTitle ? `${displayTitle} [${sourceTag}]` : top.title,
+                url: (ext && ext.originalUrl) || top.url,
+                duration: top.duration,
+                transcodings: top.transcodings,
+                requestedBy: user.displayName || user.username || 'Teman',
+            };
+        }
     }
 
     // Jika sedang memutar lagu, masukkan ke antrean

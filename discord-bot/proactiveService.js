@@ -1,6 +1,8 @@
 const db = require('./db');
 const { sendSmartNotification } = require('./notificationService');
 
+const { getPriorityBadge } = require('./scheduleService');
+
 /**
  * Format mata uang Rupiah
  */
@@ -10,6 +12,32 @@ function formatRupiah(number) {
         currency: 'IDR',
         maximumFractionDigits: 0,
     }).format(number);
+}
+
+function formatPriorityBadge(prio) {
+    return getPriorityBadge(prio);
+}
+
+function formatTimeWIB(dateObj) {
+    if (!dateObj) return '';
+    return new Intl.DateTimeFormat('id-ID', {
+        timeZone: 'Asia/Jakarta',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+    }).format(new Date(dateObj));
+}
+
+function formatDateShortWIB(dateObj) {
+    if (!dateObj) return '';
+    return new Intl.DateTimeFormat('id-ID', {
+        timeZone: 'Asia/Jakarta',
+        day: 'numeric',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+    }).format(new Date(dateObj));
 }
 
 /**
@@ -24,25 +52,39 @@ async function getBriefingContent(userId) {
     const user = userRes.rows[0] || {};
     const callsign = user.callsign || user.display_name || 'Kawan';
 
-    // 2. Task Pending Hari Ini
+    // 2. Jadwal / Agenda Kegiatan Hari Ini (WIB)
+    const schedulesRes = await db.query(
+        `SELECT id, title, description, start_time, end_time, location, priority 
+         FROM schedules 
+         WHERE user_id = $1 AND deleted_at IS NULL AND status IN ('SCHEDULED', 'ONGOING')
+           AND (start_time AT TIME ZONE 'Asia/Jakarta')::date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date
+         ORDER BY 
+            CASE UPPER(priority) WHEN 'URGENT' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 ELSE 4 END,
+            start_time ASC;`,
+        [userId]
+    );
+
+    // 3. Task Pending Hari Ini
     const tasksRes = await db.query(
         `SELECT id, title, priority, due_at 
          FROM tasks 
          WHERE user_id = $1 AND status IN ('pending', 'in_progress') AND deleted_at IS NULL
          ORDER BY 
-            CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+            CASE UPPER(priority) WHEN 'URGENT' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 ELSE 4 END,
             due_at ASC NULLS LAST
          LIMIT 5;`,
         [userId]
     );
 
-    // 3. Reminder Aktif Hari Ini (WIB)
+    // 4. Reminder Aktif Hari Ini (WIB)
     const remindersRes = await db.query(
-        `SELECT id, title, remind_at 
+        `SELECT id, title, priority, remind_at 
          FROM reminders 
          WHERE user_id = $1 AND status = 'pending' 
            AND (remind_at AT TIME ZONE 'Asia/Jakarta')::date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date
-         ORDER BY remind_at ASC
+         ORDER BY 
+            CASE UPPER(COALESCE(priority, 'MEDIUM')) WHEN 'URGENT' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 ELSE 4 END,
+            remind_at ASC
          LIMIT 5;`,
         [userId]
     );
@@ -59,12 +101,29 @@ async function getBriefingContent(userId) {
     let message = `☀️ **Selamat Pagi, ${callsign}!**\n`;
     message += `📅 *${dateFormatted}*\n\n`;
 
-    // Tasks section
+    // 1. Jadwal / Agenda Section
+    if (schedulesRes.rowCount > 0) {
+        message += `📅 **Agenda & Jadwal Hari Ini (${schedulesRes.rowCount}):**\n`;
+        schedulesRes.rows.forEach((s, i) => {
+            const prioBadge = formatPriorityBadge(s.priority);
+            const timeStr = formatTimeWIB(s.start_time);
+            const endStr = s.end_time ? ` - ${formatTimeWIB(s.end_time)}` : '';
+            const locStr = s.location ? ` (📍 ${s.location})` : '';
+            message += `${i + 1}. ${prioBadge} **${s.title}** \`[${timeStr}${endStr} WIB]\`${locStr}\n`;
+        });
+    } else {
+        message += `📅 **Jadwal:** Tidak ada agenda acara khusus untuk hari ini.\n`;
+    }
+
+    message += '\n';
+
+    // 2. Tasks section
     if (tasksRes.rowCount > 0) {
         message += `📋 **Daftar Tugas Prioritas (${tasksRes.rowCount}):**\n`;
         tasksRes.rows.forEach((t, i) => {
-            const prioBadge = t.priority === 'high' ? '🔴 [High]' : t.priority === 'medium' ? '🟡 [Med]' : '⚪';
-            message += `${i + 1}. ${prioBadge} **${t.title}**\n`;
+            const prioBadge = formatPriorityBadge(t.priority);
+            const dueStr = t.due_at ? ` (Tenggat: \`${formatDateShortWIB(t.due_at)}\`)` : '';
+            message += `${i + 1}. ${prioBadge} **${t.title}**${dueStr}\n`;
         });
     } else {
         message += `📋 **Tugas:** Belum ada tugas tertunda untuk hari ini. Waktunya fokus atau santai sejenak! ☕\n`;
@@ -72,20 +131,16 @@ async function getBriefingContent(userId) {
 
     message += '\n';
 
-    // Reminders section
+    // 3. Reminders section
     if (remindersRes.rowCount > 0) {
         message += `⏰ **Pengingat Terjadwal Hari Ini (${remindersRes.rowCount}):**\n`;
-        remindersRes.rows.forEach((r) => {
-            const timeStr = new Intl.DateTimeFormat('id-ID', {
-                timeZone: 'Asia/Jakarta',
-                hour: '2-digit',
-                minute: '2-digit',
-                hour12: false,
-            }).format(new Date(r.remind_at));
-            message += `• \`${timeStr} WIB\` — ${r.title}\n`;
+        remindersRes.rows.forEach((r, i) => {
+            const prioBadge = formatPriorityBadge(r.priority);
+            const timeStr = formatTimeWIB(r.remind_at);
+            message += `${i + 1}. ${prioBadge} \`${timeStr} WIB\` — ${r.title}\n`;
         });
     } else {
-        message += `⏰ **Pengingat:** Tidak ada jadwal pengingat untuk hari ini.\n`;
+        message += `⏰ **Pengingat:** Tidak ada jadwal alarm pengingat untuk hari ini.\n`;
     }
 
     message += `\nSemoga harimu produktif, ${callsign}! Kalau butuh bantuan apa pun, langsung panggil Amba ya! 🚀`;
@@ -125,7 +180,17 @@ async function getRecapContent(userId) {
     );
     const totalExpense = parseFloat(financeStats.rows[0]?.total_expense || 0);
 
-    // 3. Reminders Besok
+    // 3. Jadwal Kegiatan Besok (Agenda)
+    const nextDaySchedules = await db.query(
+        `SELECT id, title, start_time, location, priority
+         FROM schedules
+         WHERE user_id = $1 AND deleted_at IS NULL AND status = 'SCHEDULED'
+           AND (start_time AT TIME ZONE 'Asia/Jakarta')::date = ((NOW() AT TIME ZONE 'Asia/Jakarta') + INTERVAL '1 day')::date
+         ORDER BY start_time ASC;`,
+        [userId]
+    );
+
+    // 4. Reminders Besok
     const nextDayReminders = await db.query(
         `SELECT COUNT(*) AS count_tomorrow
          FROM reminders
@@ -139,7 +204,16 @@ async function getRecapContent(userId) {
     message += `✅ **Tugas Selesai Hari Ini:** ${completedToday} tugas\n`;
     message += `⏳ **Tugas Masih Pending:** ${pendingTotal} tugas\n`;
     message += `💰 **Pengeluaran Hari Ini:** ${formatRupiah(totalExpense)}\n`;
-    message += `⏰ **Pengingat Siap Siaga Besok:** ${countTomorrow} jadwal\n\n`;
+    message += `📅 **Agenda & Jadwal Besok:** ${nextDaySchedules.rowCount} kegiatan\n`;
+    if (nextDaySchedules.rowCount > 0) {
+        nextDaySchedules.rows.forEach((s) => {
+            const timeStr = formatTimeWIB(s.start_time);
+            const prioBadge = formatPriorityBadge(s.priority);
+            const locStr = s.location ? ` @ ${s.location}` : '';
+            message += `   └ ${prioBadge} \`${timeStr} WIB\` — **${s.title}**${locStr}\n`;
+        });
+    }
+    message += `⏰ **Pengingat Siap Siaga Besok:** ${countTomorrow} alarm\n\n`;
 
     if (pendingTotal > 0) {
         message += `Jangan lupa istirahat yang cukup ya, ${callsign}. Tugas yang belum beres bisa kita lanjutkan besok dengan energi baru! 🌙✨`;
@@ -377,6 +451,14 @@ async function checkAndSendProactiveMessages(client) {
             if (smartRes.success) {
                 console.log(`⏰ Pengingat snooze #${r.id} berhasil terpicu kembali.`);
             }
+        }
+
+        // 4. CHECK & PROCESS SCHEDULED BROADCASTS (Phase 9)
+        try {
+            const { processPendingScheduledBroadcasts } = require('./broadcastService');
+            await processPendingScheduledBroadcasts(client);
+        } catch (bcErr) {
+            console.error('⚠️ Error saat memproses broadcast terjadwal:', bcErr.message);
         }
     } catch (err) {
         console.error('⚠️ Error pada proactive scheduler:', err.message);

@@ -1,8 +1,8 @@
 require('dotenv').config();
 const http = require('http');
 const db = require('./db');
-const { Client, GatewayIntentBits, Events } = require('discord.js');
-const { downloadToBuffer, transcribeAudio, generateTTS, cleanupAudio } = require('./voiceService');
+const { Client, GatewayIntentBits, Partials, Events } = require('discord.js');
+const { downloadToBuffer, transcribeAudio, analyzeImage, generateTTS, cleanupAudio } = require('./voiceService');
 const { joinVoice, leaveVoice, isInVoice, speakInVoice, interruptVoice, isSpeakingInVoice } = require('./vcManager');
 const {
     playMusic,
@@ -29,8 +29,13 @@ const {
     getAuditLogsEmbed,
     getSecurityStatusEmbed,
     getHealthStatusEmbed,
+    getSchedulesEmbed,
+    getTasksEmbed,
+    getRemindersEmbed,
 } = require('./helpEmbeds');
 const security = require('./securityService');
+const scheduleService = require('./scheduleService');
+const taskChainService = require('./taskChainService');
 const { getCompleteHealthStatus } = require('./healthService');
 const {
     createRequestId,
@@ -87,7 +92,19 @@ const {
     getUserNotificationPreferences,
     setNotificationPreference,
 } = require('./notificationService');
-const { broadcastMessage, isAuthorizedAdmin, setDiscordClient } = require('./broadcastService');
+const {
+    broadcastMessage,
+    isAuthorizedOwner,
+    setDiscordClient,
+    parseScheduleTime,
+    formatWIBDateTime,
+    parseBroadcastInput,
+    createScheduledBroadcast,
+    listScheduledBroadcasts,
+    cancelScheduledBroadcast,
+} = require('./broadcastService');
+
+const unregisteredDiscordGatekeepMap = new Map();
 
 const N8N_WEBHOOK_URL =
     process.env.N8N_WEBHOOK_URL || 'http://localhost:5678/webhook/jarvis-discord';
@@ -101,9 +118,11 @@ const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.DirectMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildVoiceStates,
     ],
+    partials: [Partials.Channel, Partials.Message],
 });
 
 client.once(Events.ClientReady, (readyClient) => {
@@ -437,10 +456,35 @@ client.on(Events.MessageCreate, async (message) => {
             return message.reply({ embeds: [getMainHelpEmbed()] }).catch(() => {});
         }
 
-        // --- IDENTITAS PEMBUAT (kicenzeus) ---
-        const creatorRegex = /(\b(siapa\s*(yang\s*)?(buat|bikin|ciptain|develop|program)\s*(lu|kamu|amba|bot)|siapa\s*pembuat(mu|nya)?|siapa\s*creator(mu|nya)?|pembuat\s*(lu|kamu|amba)|who\s*(made|created)\s*you)\b)/i;
-        if (creatorRegex.test(cleanedContent || rawText)) {
-            return message.reply(`Gua dibuat dan dikembangkan oleh **kicenzeus**, ${preferredName}! 😎🔥 Beliau yang merancang dan ngoding sistem gua biar bisa jadi asisten pribadi pintar sekaligus bot pemutar musik berkualitas tinggi di Discord. Mau dibantu apa nih hari ini?`).catch(() => {});
+        // --- CEK ROLE PENGGUNA (!myrole / !role) ---
+        if (/^(!myrole|myrole|status\s*role|cek\s*role)$/i.test(cleanedContent || rawText)) {
+            return message.reply({ embeds: [getUserRoleEmbed(message.author, callerRole)] });
+        }
+
+        // --- GATEKEEPING USER BELUM TERDAFTAR (DISCORD) ---
+        // Jika user adalah GUEST / Belum Terdaftar (Level 1)
+        if (callerRole.level < security.ROLES.USER.level) {
+            // A. Jika di Direct Message (DM):
+            if (isDM) {
+                const lastNotified = unregisteredDiscordGatekeepMap.get(message.author.id) || 0;
+                const now = Date.now();
+                if (now - lastNotified > 12 * 3600 * 1000) {
+                    unregisteredDiscordGatekeepMap.set(message.author.id, now);
+                    return message.reply(
+                        `🔒 **[AKSES TERBATAS - JARVIS AMBA]**\n` +
+                        `Halo <@${message.author.id}>! Akses DM asisten pribadi Jarvis Amba bersifat privat.\n` +
+                        `Untuk mendapatkan izin akses, silakan hubungi Owner kami (**kicenzeus**). Terima kasih! 🙏`
+                    ).catch(() => {});
+                }
+                return; // Jangan teruskan ke AI
+            }
+
+            // B. Jika di Channel Server (Guild):
+            // Perintah musik dan help sudah lolos di atas. Jika user unregistered memanggil AI:
+            return message.reply(
+                `🔒 Halo <@${message.author.id}>! Di server ini, kamu bisa bebas memutar musik menggunakan perintah \`!play <lagu>\`.\n` +
+                `Namun untuk obrolan AI dan data asisten pribadi, akses saat ini dikhususkan untuk user terdaftar (silakan hubungi Owner **kicenzeus**). 🎵`
+            ).catch(() => {});
         }
 
         // --- FITUR MEMORI (PHASE 1) ---
@@ -509,7 +553,56 @@ client.on(Events.MessageCreate, async (message) => {
             }
         }
 
-        // 4. Pengaturan Otomatisasi Briefing & Recap
+        // 4. Shortcut Cek Jadwal / Agenda (!jadwal / !agenda / amba jadwal)
+        if (/^(!jadwal|!agenda|!schedules|!schedule|jadwal|agenda)$/i.test(cleanedContent || rawText)) {
+            try {
+                const schedules = await scheduleService.getUserSchedules(message.author.id, { limit: 10 });
+                const embed = getSchedulesEmbed(schedules, preferredName);
+                return message.reply({ embeds: [embed] });
+            } catch (err) {
+                return message.reply(`⚠️ Gagal mengambil daftar jadwal: ${err.message}`);
+            }
+        }
+
+        // 5. Shortcut Cek Tugas / To-Do (!tugas / amba tugas / !tasks / !todo)
+        if (/^(!tugas|!tasks|!task|!todo|tugas|todo)$/i.test(cleanedContent || rawText)) {
+            try {
+                const resTasks = await db.query(
+                    `SELECT id, title, description, priority, status, due_at 
+                     FROM tasks 
+                     WHERE user_id = $1 AND deleted_at IS NULL AND status IN ('pending', 'in_progress')
+                     ORDER BY 
+                        CASE UPPER(priority) WHEN 'URGENT' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 ELSE 4 END,
+                        due_at ASC NULLS LAST
+                     LIMIT 15;`,
+                    [message.author.id]
+                );
+                const embed = getTasksEmbed(resTasks.rows, preferredName);
+                return message.reply({ embeds: [embed] });
+            } catch (err) {
+                return message.reply(`⚠️ Gagal mengambil daftar tugas: ${err.message}`);
+            }
+        }
+
+        // 6. Shortcut Cek Pengingat Aktif (!pengingat / amba pengingat / !reminders / !reminder)
+        if (/^(!pengingat|!reminders|!reminder|!alarm|pengingat|alarm)$/i.test(cleanedContent || rawText)) {
+            try {
+                const resReminders = await db.query(
+                    `SELECT id, title, priority, remind_at, status 
+                     FROM reminders 
+                     WHERE user_id = $1 AND status = 'pending'
+                     ORDER BY remind_at ASC 
+                     LIMIT 15;`,
+                    [message.author.id]
+                );
+                const embed = getRemindersEmbed(resReminders.rows, preferredName);
+                return message.reply({ embeds: [embed] });
+            } catch (err) {
+                return message.reply(`⚠️ Gagal mengambil daftar pengingat: ${err.message}`);
+            }
+        }
+
+        // 7. Pengaturan Otomatisasi Briefing & Recap
         if (/^(aktifkan|nyalakan|hidupkan)\s+(briefing|daily\s*briefing)(\s*pagi)?$/i.test(cleanedContent || rawText)) {
             try {
                 await require('./db').query(
@@ -625,28 +718,104 @@ client.on(Events.MessageCreate, async (message) => {
             }
         }
 
-        // 6. Broadcast Serentak ke Seluruh Pengguna (Khusus Admin / Owner)
-        const broadcastMatch = (cleanedContent || rawText).match(/^!(?:broadcast|pengumuman|siarkan)(?:\s+(all|wa|whatsapp|discord))?\s+([\s\S]+)$/i);
+        // 6. Broadcast Serentak & Terjadwal (Eksklusif OWNER)
+        // A. Cek Antrean Jadwal (!broadcast jadwal list / !broadcast antrean)
+        if (/^!(?:broadcast|pengumuman)\s+(?:jadwal\s+list|antrean|queue)$/i.test(cleanedContent || rawText)) {
+            const isOwner = await security.isAuthorizedOwner(message.author.id);
+            if (!isOwner) {
+                return message.reply(`⛔ Akses ditolak! Fitur broadcast eksklusif hanya dapat digunakan oleh **Owner** Jarvis.`);
+            }
+            const list = await listScheduledBroadcasts({ status: 'PENDING', limit: 10 });
+            if (list.length === 0) {
+                return message.reply('📭 Tidak ada jadwal broadcast dalam antrean saat ini.');
+            }
+            let out = `📅 **[ANTREAN BROADCAST TERJADWAL]**\n\n`;
+            list.forEach((b) => {
+                out += `• **ID #${b.id}** — ⏰ \`${formatWIBDateTime(new Date(b.scheduled_at))}\`\n`;
+                out += `  Saluran: \`${b.target_channel}\` | Role: \`${b.target_role || 'SEMUA'}\`\n`;
+                out += `  Pesan: *"${b.message.substring(0, 80)}${b.message.length > 80 ? '...' : ''}"*\n\n`;
+            });
+            out += `💡 *Batalkan jadwal:* \`!broadcast batal <id>\``;
+            return message.reply(out);
+        }
+
+        // B. Batalkan Jadwal (!broadcast batal <id> / !broadcast cancel <id>)
+        const cancelBcMatch = (cleanedContent || rawText).match(/^!(?:broadcast|pengumuman)\s+(?:batal|cancel)\s+(\d+)$/i);
+        if (cancelBcMatch) {
+            const isOwner = await security.isAuthorizedOwner(message.author.id);
+            if (!isOwner) {
+                return message.reply(`⛔ Akses ditolak! Fitur broadcast eksklusif hanya dapat digunakan oleh **Owner** Jarvis.`);
+            }
+            const schedId = parseInt(cancelBcMatch[1], 10);
+            const resCancel = await cancelScheduledBroadcast(schedId, message.author.id);
+            return message.reply(resCancel.success ? resCancel.message : `❌ ${resCancel.error}`);
+        }
+
+        // C. Eksekusi Broadcast (Instan atau Terjadwal)
+        const broadcastMatch = (cleanedContent || rawText).match(/^!(?:broadcast|pengumuman|siarkan)\s+([\s\S]+)$/i);
         if (broadcastMatch) {
-            const isAuth = await isAuthorizedAdmin(message.author.id);
-            if (!isAuth) {
-                return message.reply(`⛔ Maaf ${preferredName}, fitur broadcast hanya dapat digunakan oleh **Owner** atau **Admin** Jarvis!`);
+            const isOwner = await security.isAuthorizedOwner(message.author.id);
+            if (!isOwner) {
+                return message.reply(`⛔ Maaf ${preferredName}, fitur broadcast (instan maupun terjadwal) eksklusif hanya dapat digunakan oleh **Owner** Jarvis!`);
             }
 
-            let target = (broadcastMatch[1] || 'ALL').toUpperCase();
-            if (target === 'WA') target = 'WHATSAPP';
-            const bMessage = broadcastMatch[2].trim();
+            const rawPayload = broadcastMatch[1].trim();
+            const parsed = parseBroadcastInput(rawPayload);
 
-            const statusMsg = await message.reply(`📢 Memulai pengiriman broadcast ke seluruh pengguna terdaftar (Target: **${target}**)...`);
+            if (!parsed.message) {
+                return message.reply(`❌ Pesan broadcast tidak boleh kosong.\n\nContoh:\n• Instan: \`!broadcast wa Halo semuanya!\`\n• Terjadwal: \`!broadcast jadwal 10m wa Pengumuman dalam 10 menit\`\n• Kontak Tertentu: \`!broadcast to:6288991185737 Halo Bos!\``);
+            }
+
+            // 1. Kasus Terjadwal
+            if (parsed.isScheduled) {
+                const timeParsed = parseScheduleTime(parsed.scheduleTimeStr);
+                if (!timeParsed.success) {
+                    return message.reply(`❌ Gagal menjadwalkan: ${timeParsed.error}`);
+                }
+
+                const schedRes = await createScheduledBroadcast({
+                    createdBy: message.author.id,
+                    message: parsed.message,
+                    targetChannel: parsed.targetChannel,
+                    targetRole: parsed.targetRole,
+                    targetRecipients: parsed.targetRecipients,
+                    scheduledAt: timeParsed.date,
+                });
+
+                if (schedRes.success) {
+                    let confirmMsg = `📅 **[BROADCAST BERHASIL DIJADWALKAN]**\n`;
+                    confirmMsg += `• **ID Jadwal:** \`#${schedRes.broadcast.id}\`\n`;
+                    confirmMsg += `• **Waktu Kirim:** \`${schedRes.formattedTime}\`\n`;
+                    confirmMsg += `• **Target Saluran:** \`${parsed.targetChannel}\`\n`;
+                    if (parsed.targetRole) confirmMsg += `• **Target Role:** \`${parsed.targetRole}\`\n`;
+                    if (parsed.targetRecipients) confirmMsg += `• **Kontak Khusus:** \`${parsed.targetRecipients.length}\` nomor/ID\n`;
+                    confirmMsg += `• **Isi Pesan:** *"${parsed.message.substring(0, 100)}"* \n\n`;
+                    confirmMsg += `*Amba akan otomatis menyiarkan pesan tepat pada waktu tersebut!* 🫡`;
+                    return message.reply(confirmMsg);
+                } else {
+                    return message.reply(`❌ Gagal menjadwalkan broadcast: ${schedRes.error}`);
+                }
+            }
+
+            // 2. Kasus Instan
+            const statusMsg = await message.reply(`📢 Memulai pengiriman broadcast ke seluruh pengguna terdaftar (Target: **${parsed.targetChannel}**)...`);
             const bRes = await broadcastMessage({
-                message: bMessage,
-                targetChannel: target,
+                message: parsed.message,
+                targetChannel: parsed.targetChannel,
+                targetRole: parsed.targetRole,
+                targetRecipients: parsed.targetRecipients,
                 senderUserId: message.author.id,
                 discordClient: client,
             });
 
             if (bRes.success) {
-                return statusMsg.edit(`✅ **Broadcast Selesai Terkirim!**\n• Target Channel: \`${target}\`\n• Berhasil: **${bRes.delivered}** pengguna\n• Gagal: **${bRes.failed}** pengguna\n• Total Terdaftar: **${bRes.total}** akun`);
+                let rep = `✅ **[BROADCAST SELESAI TERKIRIM]**\n`;
+                rep += `• Target Saluran: \`${parsed.targetChannel}\`\n`;
+                if (parsed.targetRole) rep += `• Target Role: \`${parsed.targetRole}\`\n`;
+                rep += `• Berhasil: **${bRes.delivered}** pengguna\n`;
+                rep += `• Gagal: **${bRes.failed}** pengguna\n`;
+                rep += `• Total Terdaftar: **${bRes.total}** akun`;
+                return statusMsg.edit(rep);
             } else {
                 return statusMsg.edit(`❌ Gagal mengirim broadcast: ${bRes.error}`);
             }
@@ -857,28 +1026,64 @@ client.on(Events.MessageCreate, async (message) => {
             return message.reply({ embeds: [getUserRoleEmbed(targetUser, targetRole)] });
         }
 
-        // 4. Atur Role User (!role set @user <ROLE> [notes]) - OWNER Only
-        const setRoleMatch = (cleanedContent || rawText).match(/^!role\s+set\s+(<@!?(\d+)>|(\d+))\s+(OWNER|ADMIN|USER|GUEST|BLOCKED)(?:\s+(.+))?$/i);
+        // 4. Daftarkan Pengguna Baru (!daftar <nomor/id> <nama> <role> - Khusus Owner)
+        const daftarMatch = (cleanedContent || rawText).match(/^!(?:daftar|register|user\s+add)\s+([^\s]+)\s+([^\s]+)(?:\s+(OWNER|ADMIN|USER))?$/i);
+        if (daftarMatch) {
+            const isOwner = await security.isAuthorizedOwner(message.author.id);
+            if (!isOwner) {
+                return message.reply('⛔ Akses ditolak! Hanya **OWNER** yang memiliki wewenang untuk mendaftarkan pengguna baru.');
+            }
+            const targetId = daftarMatch[1].trim().replace(/[<@!>]/g, '');
+            const targetName = daftarMatch[2].trim();
+            const targetRole = (daftarMatch[3] || 'USER').toUpperCase();
+            const resDaftar = await security.registerNewUser({
+                identifier: targetId,
+                displayName: targetName,
+                role: targetRole,
+                assignedBy: message.author.id,
+            });
+            return message.reply(resDaftar.message);
+        }
+
+        // 5. Atur Role User (!role set <user/phone> <ROLE> [notes]) - OWNER Only
+        const setRoleMatch = (cleanedContent || rawText).match(/^!role\s+set\s+([^\s]+)\s+(OWNER|ADMIN|USER|GUEST|BLOCKED)(?:\s+(.+))?$/i);
         if (setRoleMatch) {
-            const isOwner = await security.hasMinimumRole(message.author.id, 'OWNER');
+            const isOwner = await security.isAuthorizedOwner(message.author.id);
             if (!isOwner) {
                 await security.logAudit({
                     userId: message.author.id,
                     action: 'UNAUTHORIZED_ROLE_SET',
                     riskLevel: 'HIGH',
                     status: 'BLOCKED',
-                    metadata: { attemptedTarget: setRoleMatch[2] || setRoleMatch[3], attemptedRole: setRoleMatch[4] },
+                    metadata: { attemptedTarget: setRoleMatch[1], attemptedRole: setRoleMatch[2] },
                 });
                 return message.reply('⛔ Akses ditolak! Hanya **OWNER** yang memiliki wewenang untuk mengatur atau mengubah role pengguna.');
             }
-            const targetId = setRoleMatch[2] || setRoleMatch[3];
-            const newRole = setRoleMatch[4].toUpperCase();
-            const notes = setRoleMatch[5] || `Assigned via Discord command by ${message.author.tag}`;
+            const targetId = setRoleMatch[1].trim().replace(/[<@!>]/g, '');
+            const newRole = setRoleMatch[2].toUpperCase();
+            const notes = setRoleMatch[3] || `Assigned via Discord command by ${message.author.tag}`;
             const result = await security.setUserRole(targetId, newRole, message.author.id, notes);
             return message.reply(result.message);
         }
 
-        // 5. Inspeksi Jejak Audit Keamanan (!audit [limit] [risk]) - ADMIN/OWNER Only
+        // 6. Hapus / Kick User dari Database (!kick <target> [alasan] - Khusus Owner)
+        const kickMatch = (cleanedContent || rawText).match(/^!(?:kick|hapus|user\s+kick|user\s+delete|user\s+remove|role\s+remove|role\s+kick)\s+([^\s]+)(?:\s+([\s\S]+))?$/i);
+        if (kickMatch) {
+            const isOwner = await security.isAuthorizedOwner(message.author.id);
+            if (!isOwner) {
+                return message.reply('⛔ Akses ditolak! Hanya **OWNER** yang memiliki wewenang untuk mengeluarkan atau menghapus pengguna dari sistem.');
+            }
+            const targetId = kickMatch[1].trim().replace(/[<@!>]/g, '');
+            const reason = kickMatch[2] ? kickMatch[2].trim() : `Dikeluarkan via Discord oleh ${message.author.tag}`;
+            const resKick = await security.removeUser({
+                identifier: targetId,
+                requestedBy: message.author.id,
+                reason,
+            });
+            return message.reply(resKick.message);
+        }
+
+        // 7. Inspeksi Jejak Audit Keamanan (!audit [limit] [risk]) - ADMIN/OWNER Only
         const auditMatch = (cleanedContent || rawText).match(/^(!audit|!auditlog)(\s+(\d+))?(\s+(low|medium|high|critical))?$/i);
         if (auditMatch) {
             const hasAdmin = await security.hasMinimumRole(message.author.id, 'ADMIN');
@@ -927,9 +1132,30 @@ client.on(Events.MessageCreate, async (message) => {
             }
         }
 
+        // --- SISTEM VERIFIKASI TUGAS BERKELANJUTAN / BERTINGKAT (TASK CHAIN) ---
+        const activeChain = await taskChainService.getActiveTaskChain(message.author.id);
+        const lowerInput = (cleanedContent || rawText).toLowerCase().trim();
+
+        if (activeChain) {
+            if (/^(ya|setuju|oke|gas|eksekusi|lanjut|acc|laksanakan|yes|yep|ok|confirm|siap)$/i.test(lowerInput)) {
+                try {
+                    const { chain, results } = await taskChainService.approveAndExecuteTaskChain(activeChain.id, message.author.id);
+                    const report = taskChainService.formatTaskChainExecutionReport(chain, results, preferredName);
+                    return message.reply(report);
+                } catch (execErr) {
+                    return message.reply(`⚠️ Gagal mengeksekusi rencana tugas: ${execErr.message}`);
+                }
+            } else if (/^(batal|cancel|nggak|enggak|jangan|tidak)$/i.test(lowerInput)) {
+                await taskChainService.cancelTaskChain(activeChain.id);
+                return message.reply(`🛡️ Rencana tugas berkelanjutan **"${activeChain.title}"** telah dibatalkan. Tidak ada jadwal atau pengingat yang dibuat.`);
+            } else if (/^(revisi|ubah|ganti|tambah|kurang)/i.test(lowerInput) || lowerInput.length > 5) {
+                const revisiText = `[REVISI_RENCANA_TUGAS_BERKELANJUTAN]\nJudul Rencana: ${activeChain.title}\nRencana Sebelumnya:\n${JSON.stringify(activeChain.proposed_plan, null, 2)}\n\nCatatan Revisi dari Pengguna:\n"${cleanedContent || rawText}"\n\nInstruksi AI: Sesuaikan dan perbaiki rencana langkah kerja di atas sesuai revisi pengguna. Hasilkan format \`\`\`task_plan ... \`\`\` yang baru agar dapat diverifikasi ulang sebelum dieksekusi.`;
+                return processBotRequest(message, revisiText, false);
+            }
+        }
+
         // --- SISTEM KONFIRMASI AKSI BERISIKO TINGGI (PHASE 2 - SECTION 27 & 28) ---
         const pendingConf = getPendingConfirmation(message.author.id);
-        const lowerInput = (cleanedContent || rawText).toLowerCase();
 
         if (pendingConf) {
             if (/^(ya|ya\s*lanjut|lanjut|iya|oke|gas|eksekusi|confirm)$/i.test(lowerInput)) {
@@ -974,6 +1200,35 @@ client.on(Events.MessageCreate, async (message) => {
         let textToProcess = cleanedContent;
         if (!textToProcess || textToProcess.toLowerCase() === 'amba') {
             textToProcess = rawText.replace(new RegExp(`<@!?${botId}>`, 'g'), '').trim() || 'Halo Amba';
+        }
+
+        // Deteksi jika pengguna melampirkan file gambar (Analisis Multimodal Gemini Vision)
+        const imageAttachment = message.attachments.find(
+            (att) =>
+                (att.contentType && att.contentType.startsWith('image/')) ||
+                /\.(png|jpg|jpeg|webp|bmp|gif)$/i.test(att.name)
+        );
+        if (imageAttachment) {
+            console.log(`📸 [Discord] Mendeteksi file gambar (${imageAttachment.name}) dari ${message.author.tag}...`);
+            await message.channel.sendTyping().catch(() => {});
+            try {
+                const imgBuf = await downloadToBuffer(imageAttachment.url);
+                const imgAnalysis = await analyzeImage(
+                    imgBuf,
+                    imageAttachment.contentType || 'image/png',
+                    textToProcess !== 'Halo Amba' ? textToProcess : '',
+                    process.env.GEMINI_API_KEY
+                );
+                console.log(`📸 [Discord] Analisis Gambar Selesai. Cuplikan: "${imgAnalysis.substring(0, 80)}..."`);
+                if (textToProcess && textToProcess !== 'Halo Amba') {
+                    textToProcess = `[Pertanyaan/Instruksi Pengguna tentang Gambar: "${textToProcess}"]\n\n[Hasil Analisis Visual Gambar oleh AI:\n${imgAnalysis}\n]\n(Jawablah pertanyaan pengguna atau susunlah rencana aksi/jadwal/pengingat/tugas berdasarkan gambar di atas secara akurat dan solutif)`;
+                } else {
+                    textToProcess = `Tolong jelaskan gambar yang baru saja saya kirimkan ini.\n\n[Hasil Analisis Visual Gambar oleh AI:\n${imgAnalysis}\n]\n(Rangkum intisari gambar di atas secara informatif dan enak dibaca)`;
+                }
+            } catch (imgErr) {
+                console.error('❌ Gagal menganalisis gambar Discord:', imgErr.message);
+                return message.reply(`Aduh ${preferredName}, Amba belum berhasil menganalisis gambar tersebut (${imgErr.message}). Boleh coba kirim ulang ya!`);
+            }
         }
 
         // Jalankan pemrosesan dinamis ke AI n8n
@@ -1221,6 +1476,9 @@ async function processBotRequest(message, content, isVoiceInput, existingTypingI
         // Ambil memori aktif pengguna untuk konteks AI
         const userMemories = await getRelevantMemories(message.author.id, 8).catch(() => []);
 
+        // Ambil role pengguna dari sistem keamanan (RBAC)
+        const userRole = await security.getUserRole(message.author.id);
+
         const payload = {
             schemaVersion: 1,
             source: 'discord',
@@ -1232,6 +1490,7 @@ async function processBotRequest(message, content, isVoiceInput, existingTypingI
                 callsign: greetingInfo.callsign,
                 preferredGreetingName: greetingInfo.preferredName,
                 hasCustomCallsign: greetingInfo.hasCustomCallsign,
+                role: userRole,
             },
             userMemories: userMemories,
             guild: message.guild
@@ -1312,6 +1571,45 @@ async function processBotRequest(message, content, isVoiceInput, existingTypingI
         if (data.replyText) {
             // Sanitasi Kredensial & Sensitive Data Guard (Phase 7)
             const cleanReplyText = security.sanitizeSensitiveData(data.replyText);
+
+            // Cek apakah balasan AI mengandung rancangan task_plan (Task Berkelanjutan / Bertingkat)
+            const { cleanText: textWithoutPlan, plan } = taskChainService.extractTaskPlanFromAiResponse(cleanReplyText);
+            if (plan && Array.isArray(plan.actions) && plan.actions.length > 0) {
+                console.log(`📋 [Discord TaskChain] AI mengusulkan ${plan.actions.length} langkah aksi: "${plan.title || 'Rencana Tugas'}"`);
+                const chain = await taskChainService.createTaskChain({
+                    userId: message.author.id,
+                    channelType: 'DISCORD',
+                    channelId: message.channel.id,
+                    title: plan.title || 'Rencana Tugas Berkelanjutan',
+                    description: plan.summary || textWithoutPlan,
+                    category: plan.category || 'MULTI_STEP_TASK',
+                    proposedPlan: plan,
+                });
+
+                const proposalText = taskChainService.formatTaskChainProposalText(chain, greetingInfo.preferredName);
+                const actionRow = taskChainService.createTaskChainActionRow(chain.id);
+
+                await message.reply({
+                    content: proposalText,
+                    components: [actionRow],
+                });
+
+                recordConversation(
+                    message.author.id,
+                    message.channel.id,
+                    isVoiceInput ? 'VOICE_NOTE' : 'TEXT',
+                    'text',
+                    finalContent,
+                    proposalText,
+                    { channelName: message.channel.name || 'DM', isTaskChain: true, chainId: chain.id }
+                ).catch((err) => console.error('⚠️ Gagal mencatat percakapan:', err.message));
+
+                if (agentRunId) {
+                    finishAgentRun(agentRunId, 'COMPLETED', null, { isTaskChain: true, chainId: chain.id }).catch(() => {});
+                }
+                return;
+            }
+
             const replyMode = determineReplyMode(finalContent, isVoiceInput, data.replyMode);
             const userVoicePref = await getUserVoicePreference(message.author.id);
 
@@ -1449,6 +1747,9 @@ async function handleVoiceChannelAudio(userId, wavBuffer, guildId, textChannel =
         // Ambil memori aktif pengguna untuk konteks AI di VC
         const userMemories = await getRelevantMemories(userId, 8).catch(() => []);
 
+        // Ambil role pengguna dari sistem keamanan (RBAC)
+        const userRole = await security.getUserRole(userId);
+
         const payload = {
             schemaVersion: 1,
             source: 'discord-voice',
@@ -1460,6 +1761,7 @@ async function handleVoiceChannelAudio(userId, wavBuffer, guildId, textChannel =
                 callsign: greetingInfo.callsign,
                 preferredGreetingName: greetingInfo.preferredName,
                 hasCustomCallsign: greetingInfo.hasCustomCallsign,
+                role: userRole,
             },
             userMemories: userMemories,
             guild: { id: guildId },
@@ -1588,33 +1890,119 @@ const notifyServer = http.createServer(async (req, res) => {
         return;
     }
 
-    // 3. Endpoint Broadcast Serentak (Multi-Channel Announcement)
-    if (req.method === 'POST' && req.url === '/api/broadcast') {
-        let body = '';
-        req.on('data', (chunk) => (body += chunk));
-        req.on('end', async () => {
+    // 3. Endpoint Broadcast Serentak (Multi-Channel Announcement - Instan & Terjadwal)
+    if (req.url && (req.url.startsWith('/api/broadcast') || req.url.startsWith('/api/users'))) {
+        // Ambil daftar seluruh user terdaftar & rolenya
+        if (req.method === 'GET' && (req.url.startsWith('/api/users') || req.url.includes('users') || req.url.includes('recipients'))) {
             try {
-                const data = JSON.parse(body);
-                if (!data.message || !data.message.trim()) {
-                    res.writeHead(400, { 'Content-Type': 'application/json' });
-                    return res.end(JSON.stringify({ error: 'message wajib diisi' }));
-                }
-
-                const result = await broadcastMessage({
-                    message: data.message,
-                    targetChannel: data.target || data.channel || 'ALL',
-                    senderUserId: data.userId || null,
-                    discordClient: client,
-                });
-
-                res.writeHead(result.success ? 200 : 403, { 'Content-Type': 'application/json' });
-                return res.end(JSON.stringify(result));
+                const users = await security.listAllUsersWithRoles();
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ success: true, users }));
             } catch (err) {
                 res.writeHead(500, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: err.message }));
+                return res.end(JSON.stringify({ error: err.message }));
             }
-        });
-        return;
+        }
+
+        // List scheduled broadcasts via GET
+        if (req.method === 'GET') {
+            try {
+                const list = await listScheduledBroadcasts({ limit: 20 });
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ success: true, broadcasts: list }));
+            } catch (err) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ error: err.message }));
+            }
+        }
+
+        if (req.method === 'POST') {
+            let body = '';
+            req.on('data', (chunk) => (body += chunk));
+            req.on('end', async () => {
+                try {
+                    const data = JSON.parse(body || '{}');
+
+                    // Aksi Ambil Daftar User via POST
+                    if (data.action === 'users' || data.action === 'recipients') {
+                        const users = await security.listAllUsersWithRoles();
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        return res.end(JSON.stringify({ success: true, users }));
+                    }
+
+                    // Aksi Hapus / Kick User via POST
+                    if (data.action === 'kick' || data.action === 'delete_user' || data.action === 'remove_user') {
+                        const kickRes = await security.removeUser({
+                            identifier: data.identifier || data.userId || data.targetId,
+                            requestedBy: data.requestedBy || '713137141072396370',
+                            reason: data.reason || 'Dihapus via Dashboard/CLI',
+                        });
+                        res.writeHead(kickRes.success ? 200 : 400, { 'Content-Type': 'application/json' });
+                        return res.end(JSON.stringify(kickRes));
+                    }
+
+                    // Aksi Pembatalan Jadwal
+                    if (data.action === 'cancel' || data.action === 'batal') {
+                        const cancelRes = await cancelScheduledBroadcast({
+                            broadcastId: data.broadcastId || data.id,
+                            cancelledBy: data.userId || '713137141072396370',
+                        });
+                        res.writeHead(cancelRes.success ? 200 : 400, { 'Content-Type': 'application/json' });
+                        return res.end(JSON.stringify(cancelRes));
+                    }
+
+                    // Aksi List Jadwal via POST
+                    if (data.action === 'list') {
+                        const list = await listScheduledBroadcasts({ limit: data.limit || 20 });
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        return res.end(JSON.stringify({ success: true, broadcasts: list }));
+                    }
+
+                    if (!data.message || !data.message.trim()) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        return res.end(JSON.stringify({ error: 'message wajib diisi' }));
+                    }
+
+                    // Kasus Terjadwal
+                    if (data.schedule) {
+                        const timeParsed = parseScheduleTime(data.schedule);
+                        if (!timeParsed.success) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            return res.end(JSON.stringify({ error: `Gagal membaca format jadwal: ${timeParsed.error}` }));
+                        }
+
+                        const schedRes = await createScheduledBroadcast({
+                            createdBy: data.userId || '713137141072396370',
+                            message: data.message,
+                            targetChannel: data.target || data.channel || 'ALL',
+                            targetRole: data.targetRole || data.role || null,
+                            targetRecipients: Array.isArray(data.targetRecipients) ? data.targetRecipients : (data.to ? String(data.to).split(',').map((s) => s.trim()).filter(Boolean) : null),
+                            scheduledAt: timeParsed.date,
+                        });
+
+                        res.writeHead(schedRes.success ? 200 : 400, { 'Content-Type': 'application/json' });
+                        return res.end(JSON.stringify(schedRes));
+                    }
+
+                    // Kasus Instan
+                    const result = await broadcastMessage({
+                        message: data.message,
+                        targetChannel: data.target || data.channel || 'ALL',
+                        targetRole: data.targetRole || data.role || null,
+                        targetRecipients: Array.isArray(data.targetRecipients) ? data.targetRecipients : (data.to ? String(data.to).split(',').map((s) => s.trim()).filter(Boolean) : null),
+                        senderUserId: data.userId || '713137141072396370',
+                        discordClient: client,
+                    });
+
+                    res.writeHead(result.success ? 200 : 403, { 'Content-Type': 'application/json' });
+                    return res.end(JSON.stringify(result));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: err.message }));
+                }
+            });
+            return;
+        }
     }
 
     // 4. Endpoint Webhook WhatsApp Meta (Phase 1 & Phase 2)
@@ -1679,6 +2067,35 @@ async function handleGracefulShutdown(signal) {
         process.exit(0);
     }
 }
+
+// Listener Tombol Interaktif Discord untuk Verifikasi Task Chain
+client.on(Events.InteractionCreate, async (interaction) => {
+    if (!interaction.isButton()) return;
+    const customId = interaction.customId;
+
+    if (customId.startsWith('taskchain_approve_')) {
+        const chainId = parseInt(customId.replace('taskchain_approve_', ''), 10);
+        await interaction.deferUpdate().catch(() => {});
+        try {
+            const { chain, results } = await taskChainService.approveAndExecuteTaskChain(chainId, interaction.user.id);
+            const greeting = interaction.user.displayName || interaction.user.username;
+            const report = taskChainService.formatTaskChainExecutionReport(chain, results, greeting);
+            await interaction.followUp({ content: report }).catch(() => {});
+        } catch (err) {
+            await interaction.followUp({ content: `⚠️ Gagal mengeksekusi rencana tugas: ${err.message}`, ephemeral: true }).catch(() => {});
+        }
+    } else if (customId.startsWith('taskchain_cancel_')) {
+        const chainId = parseInt(customId.replace('taskchain_cancel_', ''), 10);
+        await interaction.deferUpdate().catch(() => {});
+        await taskChainService.cancelTaskChain(chainId);
+        await interaction.followUp({ content: '🛡️ Rencana tugas berkelanjutan telah dibatalkan. Tidak ada jadwal atau pengingat yang dibuat.', ephemeral: true }).catch(() => {});
+    } else if (customId.startsWith('taskchain_revise_')) {
+        await interaction.reply({
+            content: '✏️ Silakan ketik instruksi revisi yang Bos inginkan langsung di chat ini ya! Amba akan segera menyesuaikan rencananya.',
+            ephemeral: true,
+        }).catch(() => {});
+    }
+});
 
 process.on('SIGTERM', () => handleGracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => handleGracefulShutdown('SIGINT'));

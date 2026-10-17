@@ -216,25 +216,55 @@ Sebagai asisten AI pribadi, Amba ditenagai oleh **Google Gemini** dan terhubung 
 
 > **Tips:** Di channel teks bersama, selalu panggil dengan menyebut nama **amba** atau me-reply pesan dari bot agar Amba tahu pesan tersebut ditujukan untuknya.
 
-### A. Pengingat Waktu (Reminders)
-Amba memiliki cron-scheduler atomik yang akan menotifikasi Bos tepat pada waktu yang ditentukan.
-- *Contoh Perintah:*
-  - `"amba ingetin gw jam 13.00 buat makan siang"`
-  - `"amba besok jam 08.30 ingetin absensi kantor ya"`
-  - `"amba 15 menit lagi ingetin matiin kompor"`
+### 📌 Pembeda Utama: Tugas vs Jadwal vs Pengingat
+
+Di Jarvis Amba V2.1, ketiga entitas ini **berbeda secara mutlak** dan memiliki database masing-masing dengan tingkat prioritas tersendiri (`LOW`, `MEDIUM`, `HIGH`, `URGENT`):
+
+| Kategori | Definisi & Hakikat | Fokus Utama | Contoh Perintah | Shortcut Cepat |
+| :--- | :--- | :--- | :--- | :--- |
+| **📋 Tugas (Tasks)** | Pekerjaan / to-do list yang harus **dikerjakan & diselesaikan** (*action item*). | Status penyelesaian (`pending`, `completed`), tenggat deadline, prioritas. | `"amba catat tugas bikin modul coding prioritas urgent"` | `!tugas` / `!tasks` |
+| **📅 Jadwal (Schedules)** | Acara / kegiatan / rapat yang **terikat pada waktu pelaksanaan tertentu** (*calendar event*). | Jam mulai-selesai acara, lokasi / link meeting, prioritas. | `"amba catat jadwal rapat evaluasi besok jam 14:00 di Google Meet prioritas tinggi"` | `!jadwal` / `!agenda` |
+| **⏰ Pengingat (Reminders)** | Pemicu notifikasi / alarm aktif yang **mencolek & mengingatkan pengguna** pada jam tertentu (*alert*). | Waktu alarm berbunyi, channel tujuan, pesan personal. | `"amba ingetin gue jam 13:00 minum obat prioritas tinggi"` | `!pengingat` / `!reminders` |
+
+---
+
+### A. Agenda & Jadwal Kegiatan (Schedules)
+Catat kalender acara, kegiatan perkuliahan, rapat kerja, atau janji temu lengkap dengan lokasi dan jam pelaksanaan.
+- *Menambah Jadwal:*
+  - `"amba catat jadwal rapat evaluasi sprint besok jam 2 siang di Google Meet prioritas tinggi"`
+  - `"amba catat jadwal kuliah kalkulus jumat jam 08.00 - 10.00 di Ruang 301"`
+  - `"amba catat jadwal futsal sabtu malam jam 19.00"`
+- *Melihat Jadwal:*
+  - Ketik `!jadwal` atau `!agenda` (di Discord maupun WhatsApp).
+  - Atau secara natural: `"amba jadwal gue hari ini apa aja?"` / `"amba besok ada agenda apa?"`
+- *Kombinasi Jadwal + Pengingat Otomatis:*
+  - `"amba catat jadwal rapat besok jam 2 siang di Zoom dan tolong ingetin 15 menit sebelumnya ya"`
+  - *(Amba otomatis membuat jadwal di agenda DAN memasang alarm pengingat 15 menit sebelumnya!)*
 
 ### B. Manajemen Tugas (Todo List)
 Catat dan kelola tugas harian tanpa perlu buka aplikasi lain.
 - *Menambah Tugas:*
-  - `"amba catat tugas bikin laporan keuangan bulanan prioritas tinggi"`
-  - `"amba tambahin todo beli kuota internet"`
+  - `"amba catat tugas bikin laporan keuangan bulanan prioritas urgent"`
+  - `"amba tambahin todo beli kuota internet prioritas santai"`
 - *Melihat Tugas:*
-  - `"amba apa aja tugas gue yang belum selesai?"`
-  - `"amba tampilkan semua daftar todo list gue"`
+  - Ketik `!tugas` atau `!tasks` atau `!todo`.
+  - Atau secara natural: `"amba apa aja tugas gue yang belum selesai?"`
 - *Menyelesaikan Tugas:*
   - `"amba tandai tugas laporan keuangan sudah selesai"`
 
-### C. Pencatatan Keuangan Pribadi
+### C. Pengingat Waktu (Reminders)
+Amba memiliki cron-scheduler atomik yang akan mencolek dan menotifikasi Bos tepat pada waktu yang ditentukan.
+- *Memasang Pengingat:*
+  - `"amba ingetin gw jam 13.00 buat makan siang prioritas tinggi"`
+  - `"amba besok jam 08.30 ingetin absensi kantor ya"`
+  - `"amba 15 menit lagi ingetin matiin kompor"`
+- *Melihat Pengingat Aktif:*
+  - Ketik `!pengingat` atau `!reminders` atau `!alarm`.
+  - Atau secara natural: `"amba apa aja pengingat aktif gue?"`
+- *Menunda Pengingat (Snooze):*
+  - Ketik `!snooze 10` untuk menunda pengingat yang baru saja berbunyi selama 10 menit.
+
+### D. Pencatatan Keuangan Pribadi
 Amba membantu melacak arus kas pemasukan dan pengeluaran harian.
 - *Mencatat Pengeluaran:*
   - `"amba catat pengeluaran 45rb buat makan siang geprek"`
@@ -495,20 +525,38 @@ Ketik **`!ping`**, **`!health`**, atau **`!status`** untuk memunculkan kartu sta
 
 ---
 
-### O. Fitur Broadcast & Pengumuman Massal Serentak (WhatsApp & Discord)
-Bos (Owner) atau Admin kini bisa menyiarkan pesan pengumuman penting secara serentak ke seluruh pengguna terdaftar:
-- **Dari WhatsApp:** Chat ke nomor bot `!broadcast <pesan>` atau `amba broadcast: <pesan>` (atau `!broadcast wa <pesan>` / `!broadcast discord <pesan>`).
-- **Dari Discord:** Ketik `!broadcast <pesan>` atau `!broadcast all <pesan>` di channel atau DM bot.
-- **Dari PC Sekali Klik:** Double-click file **`broadcast.bat`** di folder project `D:\Dev\project\n8n\Jarvis` untuk mengirim pesan interaktif langsung dari desktop!
-- Amba otomatis memformat pesan secara personal ke tiap pengguna:
-  `📢 [PENGUMUMAN JARVIS AMBA]`
-  `Halo <Nama Pengguna>!`
-  `...`
+### O. Fitur Broadcast & Pengumuman Massal (WhatsApp & Discord)
+Fitur Broadcast (instan maupun terjadwal) **100% eksklusif hanya untuk OWNER** demi keamanan dan kontrol penuh:
+- **Dari WhatsApp / Discord:**
+  - **Broadcast Instan:** `!broadcast <pesan>` atau `!broadcast wa <pesan>` atau `!broadcast discord <pesan>`
+  - **Broadcast Terjadwal:** `!broadcast jadwal 15m <pesan>` atau `!broadcast jadwal 17:30 <pesan>` atau `!broadcast jadwal 2026-10-17 09:00 <pesan>`
+  - **Filter Role & Kontak Khusus:** `!broadcast role:admin <pesan>` atau `!broadcast to:6288991185737,841158598465159169 <pesan>`
+  - **Lihat Antrean Jadwal:** `!broadcast jadwal list`
+  - **Batalkan Jadwal:** `!broadcast batal <id>`
+- **Dari PC Sekali Klik:** Double-click file **`broadcast.bat`** di folder project `D:\Dev\project\n8n\Jarvis` untuk membuka menu interaktif (kirim instan, jadwalkan, cek list, atau batalkan jadwal).
+- **Manajemen Role, Pendaftaran & Kick Pengguna:**
+  - Owner dapat mendaftarkan user baru: `!daftar <nomor_wa_atau_id_discord> <nama> [ROLE]`
+  - Owner dapat mengatur role: `!role set <id_atau_nomor> <ROLE>`
+  - Owner dapat menghapus/kick user dari database: `!kick <nomor_atau_id>` *(Akses dicabut permanen)*
+  - Melihat daftar user & role: `!role list`
+  - Setiap user dapat mengecek rolenya sendiri: `!myrole`
+- **Akses Publik Musik Discord:**
+  - Seluruh pengguna di server Discord **bebas memutar musik** (`!play`, `!skip`, `!queue`, `!pause`, dll.) tanpa perlu registrasi khusus.
+  - Percakapan AI privat dibatasi khusus untuk user yang telah didaftarkan oleh Owner guna mencegah pemborosan token/kuota.
 
 ---
 
-## 3. Perintah Bantuan di Discord (`!help`)
+## 3. Perintah Bantuan di Discord & WhatsApp (`!help` & Obrolan Natural)
 
+### A. Tanya Langsung ke Amba di Obrolan (Conversational Command Help) ⭐
+Kamu tidak perlu menghafal seluruh perintah kaku. Cukup tanya Amba di chat santai (WhatsApp atau Discord), Amba akan menjelaskan tata caranya secara natural seperti teman ngobrol:
+- *"amba gimana cara kick orang?"*
+- *"cara nambah orang atau ubah role gimana?"*
+- *"cara broadcast pengumuman gimana?"*
+- *"cara play musik di discord gimana?"*
+- *"cara cek role gimana?"*
+
+### B. Menu Bantuan Cepat Rich Embed di Discord (`!help`):
 Tersedia menu bantuan interaktif langsung di dalam Discord berupa Rich Embed yang estetik dan terstruktur:
 
 - **`!help`** atau **`!h`** atau **`amba help`**:  
@@ -520,7 +568,43 @@ Tersedia menu bantuan interaktif langsung di dalam Discord berupa Rich Embed yan
 
 ---
 
-## 4. Identitas & Kredit Pembuat
+## 4. Fitur Task Berkelanjutan, Analisis Gambar & Verifikasi Ulang (Task Chain & Approval Gate) 🚀
+
+Jarvis / Amba kini dibekali kemampuan untuk menangani **Tugas Berkelanjutan / Bertingkat (Chained Tasks & Continuous Workflows)** yang melibatkan analisis visual, perencanaan multi-langkah, dan **Verifikasi Ulang Wajib (Human-in-the-Loop Approval Gate)** sebelum eksekusi ke database.
+
+### A. Alur Kerja Tugas Berkelanjutan (Workflow)
+1. **Input Analisis (Teks / Gambar / Dokumen):**
+   - Pengguna mengirim foto/gambar jadwal (contoh: *Jadwal Petugas Foto Apel Pagi*, jadwal piket, jadwal ronda, jadwal kuliah).
+   - Pengguna memberikan instruksi spesifik: *"Tolong analisa jadwal foto apel ini, cari jadwal atas nama Kresenzius, lalu buat pengingat H-1 jam 21:00 malam sebelum tugasnya."*
+   - Bot membaca gambar secara presisi menggunakan **Google Gemini Vision OCR**, mencocokkan nama, mengekstrak seluruh tanggal tugas, dan menghitung waktu pengingat H-1.
+2. **Penyusunan Rencana Kerja (Action Plan Proposal):**
+   - Bot **DILARANG LANGSUNG MEMASUKKAN DATA SECARA LIAR**.
+   - Bot menyusun proposal langkah kerja yang rapi:
+     - 🔍 **Hasil Analisis:** Rangkuman temuan nama dan tanggal tugas.
+     - ⚡ **Langkah Eksekusi yang Direncanakan:**
+       - 📅 **[JADWAL]** Tanggal tugas, jam mulai & selesai, lokasi.
+       - ⏰ **[PENGINGAT]** Waktu alarm H-1 (pukul 21:00 WIB) dengan kalimat pengingat personal.
+       - 📋 **[TUGAS]** Checklist action item jika diperlukan.
+3. **Verifikasi Ulang & Persetujuan (Human-in-the-Loop Gate):**
+   - **Di Discord:** Tersedia **Interactive Action Buttons**:
+     - `[✅ Setujui & Eksekusi]` $\rightarrow$ Langsung memasukkan seluruh jadwal & pengingat ke database PostgreSQL.
+     - `[✏️ Minta Revisi]` $\rightarrow$ Memberikan catatan revisi (contoh: *"Ubah jam pengingat jadi jam 20:00"*).
+     - `[❌ Batalkan]` $\rightarrow$ Membatalkan rencana tanpa merubah database.
+   - **Di WhatsApp & Chat Teks:** Cukup balas secara natural:
+     - Balas *"Setuju"*, *"Ya"*, *"Eksekusi"*, *"Gas"*, *"Oke"*, *"Acc"* untuk eksekusi.
+     - Balas *"Ubah jam pengingat jadi jam 8 malam"* untuk revisi.
+     - Balas *"Batal"* untuk membatalkan.
+4. **Laporan Hasil Eksekusi:**
+   - Setelah disetujui, bot mengeksekusi semua aksi secara atomik dan menampilkan laporan lengkap jumlah jadwal dan pengingat aktif yang berhasil didaftarkan.
+
+### B. Contoh untuk Tugas Kuliah, PRD & Proyek Web
+Fitur task berkelanjutan juga berlaku untuk tugas pembuatan proyek/kuliah:
+- *"Amba, tolong buatin PRD dan arsitektur untuk web e-commerce tugas kuliah Web Dev, terus bikin checklist pengerjaannya."*
+- Amba akan menganalisis kebutuhan proyek, merancang spesifikasi (PRD), menyusun milestone tugas bertahap, dan meminta verifikasi Bos sebelum meluncurkan pengerjaan modul kodenya!
+
+---
+
+## 5. Identitas & Kredit Pembuat
 
 - **Creator & Developer:** **kicenzeus** 🔥
 - **Pertanyaan Pengguna:**  

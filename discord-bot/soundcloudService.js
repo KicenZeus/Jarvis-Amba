@@ -1,5 +1,15 @@
-const { spawn } = require('child_process');
-const ffmpeg = require('ffmpeg-static');
+const { spawn, execSync } = require('child_process');
+
+let ffmpeg = 'ffmpeg';
+try {
+    execSync('ffmpeg -version', { stdio: 'ignore' });
+} catch (_) {
+    try {
+        ffmpeg = require('ffmpeg-static') || 'ffmpeg';
+    } catch (_) {
+        ffmpeg = 'ffmpeg';
+    }
+}
 
 let cachedClientId = null;
 let lastKeyFetchTime = 0;
@@ -80,17 +90,44 @@ async function searchSoundCloud(query) {
         return [];
     }
 
-    return data.collection
+    const cleanQuery = query.trim();
+    const wantsCover = /(\b(cover|remix|bootleg|karaoke|instrumental|parodi|tribute)\b)/i.test(cleanQuery);
+
+    const mapped = data.collection
         .filter((track) => track.media && Array.isArray(track.media.transcodings) && track.media.transcodings.length > 0)
-        .map((t) => ({
-            id: t.id,
-            title: t.title,
-            author: (t.user && (t.user.username || t.user.full_name)) || 'Unknown Artist',
-            url: t.permalink_url,
-            duration: formatDuration(t.duration),
-            durationMs: t.duration,
-            transcodings: t.media.transcodings,
-        }));
+        .map((t, idx) => {
+            let score = 100 - idx * 2;
+            const titleLower = (t.title || '').toLowerCase();
+            const durMs = t.duration || 0;
+
+            // Demote preview snippet (< 45 detik)
+            if (durMs > 0 && durMs < 45000) {
+                score -= 150;
+            }
+
+            if (!wantsCover) {
+                if (/(\b(cover|covered\s+by|cover\s+lagu|remix|bootleg|nightcore|slowed|sped\s+up|reverb|karaoke|instrumental|parodi|tribute)\b)/i.test(titleLower)) {
+                    score -= 200;
+                }
+                if (/(\b(official|original)\b)/i.test(titleLower)) {
+                    score += 50;
+                }
+            }
+
+            return {
+                id: t.id,
+                title: t.title,
+                author: (t.user && (t.user.username || t.user.full_name)) || 'Unknown Artist',
+                url: t.permalink_url,
+                duration: formatDuration(t.duration),
+                durationMs: t.duration,
+                transcodings: t.media.transcodings,
+                score,
+            };
+        });
+
+    mapped.sort((a, b) => b.score - a.score);
+    return mapped;
 }
 
 /**
@@ -127,9 +164,9 @@ async function resolveSoundCloudUrl(trackUrl) {
 }
 
 /**
- * Mendapatkan audio stream mentah (PCM s16le 48kHz) via FFmpeg
+ * Mendapatkan audio stream kualitas tinggi (OggOpus 192kbps) via FFmpeg
  */
-async function getAudioStreamFromTranscodings(transcodings) {
+async function getAudioStreamFromTranscodings(transcodings, volume = 1.0) {
     const clientId = await getSoundCloudClientId();
 
     // Prioritaskan format progressive dulu, baru HLS (aac_96k, abr_sq)
@@ -164,15 +201,27 @@ async function getAudioStreamFromTranscodings(transcodings) {
         throw new Error(lastError || 'Tidak ada stream audio yang valid dari SoundCloud.');
     }
 
-    // Gunakan FFmpeg untuk mengonversi stream (termasuk .m3u8 HLS) ke PCM s16le yang disukai @discordjs/voice
+    const filterParts = [];
+    if (typeof volume === 'number' && volume > 0 && volume !== 1.0) {
+        filterParts.push(`volume=${volume.toFixed(2)}`);
+    }
+    filterParts.push('highpass=f=32');
+    filterParts.push('equalizer=f=3800:t=q:w=1.0:g=1.2');
+    filterParts.push('alimiter=limit=-1.0dB:level=false');
+    filterParts.push('aresample=48000:resampler=soxr:precision=28:cutoff=1.0');
+
     const ffmpegArgs = [
         '-reconnect', '1',
         '-reconnect_streamed', '1',
         '-reconnect_delay_max', '5',
         '-i', playableStreamUrl,
-        '-f', 's16le',
-        '-ar', '48000',
-        '-ac', '2',
+        '-filter:a', filterParts.join(','),
+        '-c:a', 'libopus',
+        '-b:a', '192k',
+        '-vbr', 'on',
+        '-compression_level', '10',
+        '-application', 'audio',
+        '-f', 'opus',
         'pipe:1',
     ];
 

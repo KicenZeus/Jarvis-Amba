@@ -1,6 +1,8 @@
 const fs = require('fs');
 const channelService = require('./channelService');
 const db = require('./db');
+const scheduleService = require('./scheduleService');
+const taskChainService = require('./taskChainService');
 const { getRelevantMemories } = require('./memoryService');
 const { transcribeAudio, analyzeImage, generateTTS, cleanupAudio } = require('./voiceService');
 
@@ -255,6 +257,9 @@ const rateLimitMap = new Map();
 const RATE_LIMIT_WINDOW_MS = 60000; // 1 menit
 const MAX_REQUESTS_PER_WINDOW = 20; // 20 request per menit
 
+// In-Memory Gatekeep Debounce Map (Cegah spam balasan ke nomor yang belum terdaftar)
+const unregisteredGatekeepMap = new Map();
+
 function checkRateLimit(phone, text) {
     const now = Date.now();
     let record = rateLimitMap.get(phone);
@@ -321,16 +326,17 @@ async function handleWebhookEvent(req, res, rawBody) {
                 const messageId = msg.id;
                 const contact = contacts.find((c) => c.wa_id === fromNumber) || {};
                 const senderName = contact.profile?.name || fromNumber;
+                const cleanPhone = String(fromNumber).replace(/\D/g, '');
 
                 // 1. Whitelist / Allowlist Check (Phase 7: Security Policy)
                 const rawAllowed = process.env.WA_ALLOWED_NUMBERS || process.env.ALLOWED_USER_IDS || '';
                 const allowedNumbers = rawAllowed.split(',').map((s) => s.trim().replace(/\D/g, '')).filter(Boolean);
 
-                if (allowedNumbers.length > 0 && !allowedNumbers.includes(String(fromNumber).replace(/\D/g, ''))) {
+                if (allowedNumbers.length > 0 && !allowedNumbers.includes(cleanPhone)) {
                     console.warn(`⛔ [WhatsApp Security] Akses ditolak untuk nomor tidak terdaftar: ${fromNumber}`);
                     await sendWhatsAppTextMessage(
                         fromNumber,
-                        `Maaf ${senderName}, nomor WhatsApp Anda (${fromNumber}) belum terdaftar dalam izin akses privat Jarvis Amba. Silakan hubungi admin / owner untuk mendapatkan izin.`
+                        `Maaf ${senderName}, nomor WhatsApp Anda (${fromNumber}) belum terdaftar dalam izin akses privat Jarvis Amba. Silakan hubungi Owner untuk mendapatkan izin.`
                     );
                     continue;
                 }
@@ -442,68 +448,357 @@ async function handleWebhookEvent(req, res, rawBody) {
                     continue;
                 }
 
-                // 2. Resolve Identitas Pengguna (Tabel users & user_channels)
+                // 4. Resolve Identitas Pengguna & Hak Akses (Tabel users & user_channels)
                 let resolved = await channelService.resolveUserByChannel('WHATSAPP', fromNumber);
                 let internalUserId = resolved.userId;
 
-                if (!resolved.isLinked) {
+                const isOwner = cleanPhone === '6288991185737' || resolved.user?.role === 'OWNER';
+
+                // Jika nomor adalah Owner tapi belum ter-link di user_channels
+                if (isOwner && !resolved.isLinked) {
                     try {
-                        const newUserId = `wa_${fromNumber}`;
-                        const newUser = await db.query(
-                            `INSERT INTO users (id, discord_user_id, display_name, role, status, created_at, updated_at)
-                             VALUES ($1, $2, $3, 'USER', 'ACTIVE', NOW(), NOW())
-                             ON CONFLICT (id) DO NOTHING
-                             RETURNING id, display_name;`,
-                            [newUserId, newUserId, senderName]
-                        );
-                        internalUserId = newUser.rows[0]?.id || newUserId;
-                        await channelService.linkUserChannel(internalUserId, 'WHATSAPP', fromNumber, {
+                        const ownerId = '713137141072396370';
+                        internalUserId = ownerId;
+                        await channelService.linkUserChannel(ownerId, 'WHATSAPP', fromNumber, {
                             displayName: senderName,
                             phoneNumber: fromNumber,
                             isPrimary: true,
                         });
-                        console.log(`👤 [WhatsApp] Profil pengguna baru terdaftar: ${senderName} (ID: ${internalUserId})`);
-                    } catch (userErr) {
-                        console.error('⚠️ [WhatsApp] Gagal membuat user baru:', userErr.message);
+                        resolved = await channelService.resolveUserByChannel('WHATSAPP', fromNumber);
+                    } catch (errLink) {
+                        console.warn('⚠️ Gagal linking owner WhatsApp:', errLink.message);
                     }
+                }
+
+                // --- GATEKEEPING: USER BELUM TERDAFTAR KE DATABASE ---
+                const userRole = resolved.user?.role || 'GUEST';
+                const isRegisteredUser = resolved.isLinked && resolved.status === 'ACTIVE' && 
+                                         resolved.user?.status === 'ACTIVE' && 
+                                         ['OWNER', 'ADMIN', 'USER'].includes(userRole);
+
+                if (!isOwner && !isRegisteredUser) {
+                    const lastNotified = unregisteredGatekeepMap.get(cleanPhone) || 0;
+                    const now = Date.now();
+                    if (now - lastNotified > 12 * 3600 * 1000) {
+                        unregisteredGatekeepMap.set(cleanPhone, now);
+                        await sendWhatsAppTextMessage(
+                            fromNumber,
+                            `🔒 *[AKSES TERBATAS - JARVIS AMBA]*\n\nHalo ${senderName}! Nomor WhatsApp Anda (*${fromNumber}*) belum terdaftar dalam akses privat asisten Jarvis Amba.\n\nUntuk mendapatkan izin akses, silakan hubungi Owner kami (*KicenZeus*).\n\nTerima kasih! 🙏`
+                        );
+                    }
+                    console.warn(`🛡️ [WhatsApp Gatekeep] Mengabaikan pesan dari user belum terdaftar: ${senderName} (${fromNumber})`);
+                    continue; // Skip processing / Do NOT forward to n8n AI!
                 }
 
                 // Ambil memori aktif pengguna untuk konteks AI personal
                 const userMemories = await getRelevantMemories(internalUserId || fromNumber, 6).catch(() => []);
 
-                // --- Fitur Broadcast Massal (Khusus Owner / Admin) ---
-                const broadcastMatch = textContent.match(/^!(?:broadcast|pengumuman|siarkan)(?:\s+(all|wa|whatsapp|discord))?\s+([\s\S]+)$/i)
-                    || textContent.match(/^(?:amba\s+)?broadcast(?:\s+(all|wa|whatsapp|discord))?[:\s]+([\s\S]+)$/i);
+                // --- FITUR ROLE MANAGEMENT & BROADCAST (KHUSUS OWNER) ---
+                // 1. Cek Role Sendiri (!myrole / amba role)
+                if (/^(!myrole|!role|myrole|cek\s*role|status\s*role)$/i.test(textContent.trim())) {
+                    const uRole = resolved.user?.role || (isOwner ? 'OWNER' : 'USER');
+                    const cSign = resolved.user?.callsign ? ` ("${resolved.user.callsign}")` : '';
+                    await sendWhatsAppTextMessage(
+                        fromNumber,
+                        `⭐ *[STATUS AKUN JARVIS AMBA]*\n• Nama: *${senderName}*${cSign}\n• Nomor: *${fromNumber}*\n• Role: *${uRole}*\n• Status: *ACTIVE*`
+                    );
+                    continue;
+                }
+
+                // --- VERIFIKASI TUGAS BERKELANJUTAN / BERTINGKAT (TASK CHAIN) DI WHATSAPP ---
+                const activeChain = await taskChainService.getActiveTaskChain(internalUserId || fromNumber);
+                if (activeChain) {
+                    const lower = textContent.toLowerCase().trim();
+                    if (/^(ya|setuju|oke|gas|eksekusi|lanjut|acc|laksanakan|yes|yep|ok|confirm|siap)$/i.test(lower)) {
+                        try {
+                            const { chain, results } = await taskChainService.approveAndExecuteTaskChain(activeChain.id, internalUserId || fromNumber);
+                            const report = taskChainService.formatTaskChainExecutionReport(chain, results, userDisplayName);
+                            await sendWhatsAppTextMessage(fromNumber, report);
+                        } catch (execErr) {
+                            await sendWhatsAppTextMessage(fromNumber, `⚠️ Gagal mengeksekusi rencana tugas: ${execErr.message}`);
+                        }
+                        continue;
+                    } else if (/^(batal|cancel|nggak|enggak|jangan|tidak)$/i.test(lower)) {
+                        await taskChainService.cancelTaskChain(activeChain.id);
+                        await sendWhatsAppTextMessage(fromNumber, `🛡️ Rencana tugas berkelanjutan *"${activeChain.title}"* telah dibatalkan. Tidak ada jadwal atau pengingat yang dibuat.`);
+                        continue;
+                    } else if (/^(revisi|ubah|ganti|tambah|kurang)/i.test(lower) || lower.length > 5) {
+                        textContent = `[REVISI_RENCANA_TUGAS_BERKELANJUTAN]\nJudul Rencana: ${activeChain.title}\nRencana Sebelumnya:\n${JSON.stringify(activeChain.proposed_plan, null, 2)}\n\nCatatan Revisi dari Pengguna:\n"${textContent}"\n\nInstruksi AI: Sesuaikan dan perbaiki rencana langkah kerja di atas sesuai revisi pengguna. Hasilkan format \`\`\`task_plan ... \`\`\` yang baru agar dapat diverifikasi ulang sebelum dieksekusi.`;
+                    }
+                }
+
+                // 1b. Cek Jadwal & Agenda Kegiatan (!jadwal / !agenda)
+                if (/^(!jadwal|!agenda|!schedules|!schedule|jadwal|agenda)$/i.test(textContent.trim())) {
+                    const schedules = await scheduleService.getUserSchedules(internalUserId || fromNumber, { limit: 10 });
+                    const textList = scheduleService.formatSchedulesListText(schedules, `📅 DAFTAR JADWAL & AGENDA [${senderName}]`);
+                    await sendWhatsAppTextMessage(fromNumber, textList);
+                    continue;
+                }
+
+                // 1c. Cek Tugas & To-Do List (!tugas / !tasks / !todo)
+                if (/^(!tugas|!tasks|!task|!todo|tugas|todo)$/i.test(textContent.trim())) {
+                    const resTasks = await db.query(
+                        `SELECT id, title, description, priority, status, due_at 
+                         FROM tasks 
+                         WHERE user_id = $1 AND deleted_at IS NULL AND status IN ('pending', 'in_progress')
+                         ORDER BY 
+                            CASE UPPER(priority) WHEN 'URGENT' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 ELSE 4 END,
+                            due_at ASC NULLS LAST
+                         LIMIT 15;`,
+                        [internalUserId || fromNumber]
+                    );
+                    let msg = `📋 *DAFTAR TUGAS & TO-DO [${senderName}]* (Total: ${resTasks.rowCount})\n\n`;
+                    if (resTasks.rowCount === 0) {
+                        msg += `✨ Belum ada tugas tertunda. Kamu bisa catat tugas baru kapan saja! ☕`;
+                    } else {
+                        resTasks.rows.forEach((t, i) => {
+                            const badge = scheduleService.getPriorityBadge(t.priority);
+                            const status = t.status === 'in_progress' ? '⏳ In Progress' : '📋 Pending';
+                            let dueStr = '';
+                            if (t.due_at) {
+                                const dStr = new Intl.DateTimeFormat('id-ID', {
+                                    timeZone: 'Asia/Jakarta',
+                                    day: 'numeric',
+                                    month: 'short',
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                    hour12: false,
+                                }).format(new Date(t.due_at));
+                                dueStr = `\n   └ ⏰ Tenggat: \`${dStr} WIB\``;
+                            }
+                            msg += `${i + 1}. ${badge} *${t.title}* [${status}]${dueStr}\n`;
+                        });
+                    }
+                    await sendWhatsAppTextMessage(fromNumber, msg);
+                    continue;
+                }
+
+                // 1d. Cek Pengingat & Alarm Aktif (!pengingat / !reminders / !alarm)
+                if (/^(!pengingat|!reminders|!reminder|!alarm|pengingat|alarm)$/i.test(textContent.trim())) {
+                    const resReminders = await db.query(
+                        `SELECT id, title, priority, remind_at 
+                         FROM reminders 
+                         WHERE user_id = $1 AND status = 'pending'
+                         ORDER BY remind_at ASC 
+                         LIMIT 15;`,
+                        [internalUserId || fromNumber]
+                    );
+                    let msg = `⏰ *DAFTAR PENGINGAT & ALARM [${senderName}]* (Total: ${resReminders.rowCount})\n\n`;
+                    if (resReminders.rowCount === 0) {
+                        msg += `ℹ️ Belum ada alarm pengingat aktif yang terjadwal.`;
+                    } else {
+                        resReminders.rows.forEach((r, i) => {
+                            const badge = scheduleService.getPriorityBadge(r.priority);
+                            const dStr = new Intl.DateTimeFormat('id-ID', {
+                                timeZone: 'Asia/Jakarta',
+                                weekday: 'short',
+                                day: 'numeric',
+                                month: 'short',
+                                hour: '2-digit',
+                                minute: '2-digit',
+                                hour12: false,
+                            }).format(new Date(r.remind_at));
+                            msg += `${i + 1}. ${badge} \`${dStr} WIB\`\n   └ 💬 _${r.title}_\n`;
+                        });
+                    }
+                    await sendWhatsAppTextMessage(fromNumber, msg);
+                    continue;
+                }
+
+                // 2. Lihat Daftar User Terdaftar (!role list / !user list - Khusus Owner)
+                if (/^!(?:role\s+list|user\s+list|daftar\s+user|list\s+user)$/i.test(textContent.trim())) {
+                    if (!isOwner) {
+                        await sendWhatsAppTextMessage(fromNumber, '⛔ Hanya OWNER yang memiliki hak untuk melihat daftar seluruh pengguna.');
+                        continue;
+                    }
+                    const { listAllUsersWithRoles } = require('./securityService');
+                    const userList = await listAllUsersWithRoles();
+                    let msgList = `📋 *[DAFTAR PENGGUNA TERDAFTAR JARVIS]*\nTotal: *${userList.length}* akun aktif\n\n`;
+                    userList.forEach((u, i) => {
+                        const badge = u.role === 'OWNER' ? '👑' : u.role === 'ADMIN' ? '🛡️' : '⭐';
+                        const platform = u.channel_type === 'WHATSAPP' ? '📱 WA' : '💬 DC';
+                        msgList += `${i + 1}. ${badge} *${u.display_name}* [${u.role}]\n   ${platform}: \`${u.external_user_id}\`\n`;
+                    });
+                    msgList += `\n💡 *Ubah role:* \`!role set <nomor/id> <role>\`\n💡 *Daftar user:* \`!daftar <nomor/id> <nama> <role>\`\n💡 *Kick user:* \`!kick <nomor/id>\``;
+                    await sendWhatsAppTextMessage(fromNumber, msgList);
+                    continue;
+                }
+
+                // 3. Set Role Pengguna (!role set <target> <role> - Khusus Owner)
+                const roleSetMatch = textContent.match(/^!role\s+set\s+([^\s]+)\s+(OWNER|ADMIN|USER|GUEST|BLOCKED)$/i);
+                if (roleSetMatch) {
+                    if (!isOwner) {
+                        await sendWhatsAppTextMessage(fromNumber, '⛔ Hanya OWNER yang memiliki hak untuk mengubah role pengguna.');
+                        continue;
+                    }
+                    const targetId = roleSetMatch[1].trim();
+                    const targetRole = roleSetMatch[2].toUpperCase();
+                    const { setUserRole } = require('./securityService');
+                    const resSet = await setUserRole(targetId, targetRole, internalUserId || fromNumber, 'Updated via WhatsApp by Owner');
+                    await sendWhatsAppTextMessage(fromNumber, resSet.message);
+                    continue;
+                }
+
+                // 4. Daftarkan Pengguna Baru (!daftar <nomor/id> <nama> <role> - Khusus Owner)
+                const daftarMatch = textContent.match(/^!(?:daftar|register|user\s+add)\s+([^\s]+)\s+([^\s]+)(?:\s+(OWNER|ADMIN|USER))?$/i);
+                if (daftarMatch) {
+                    if (!isOwner) {
+                        await sendWhatsAppTextMessage(fromNumber, '⛔ Hanya OWNER yang memiliki hak untuk mendaftarkan pengguna baru.');
+                        continue;
+                    }
+                    const targetId = daftarMatch[1].trim();
+                    const targetName = daftarMatch[2].trim();
+                    const targetRole = (daftarMatch[3] || 'USER').toUpperCase();
+                    const { registerNewUser } = require('./securityService');
+                    const resDaftar = await registerNewUser({
+                        identifier: targetId,
+                        displayName: targetName,
+                        role: targetRole,
+                        assignedBy: internalUserId || fromNumber,
+                    });
+                    await sendWhatsAppTextMessage(fromNumber, resDaftar.message);
+                    continue;
+                }
+
+                // 4b. Hapus / Kick User dari Database (!kick <nomor/id> / !hapus <nomor/id> - Khusus Owner)
+                const kickMatch = textContent.match(/^!(?:kick|hapus|user\s+kick|user\s+delete|user\s+remove|role\s+remove|role\s+kick)\s+([^\s]+)(?:\s+([\s\S]+))?$/i);
+                if (kickMatch) {
+                    if (!isOwner) {
+                        await sendWhatsAppTextMessage(fromNumber, '⛔ Hanya OWNER yang memiliki hak untuk mengeluarkan/menghapus pengguna dari sistem.');
+                        continue;
+                    }
+                    const targetId = kickMatch[1].trim();
+                    const reason = kickMatch[2] ? kickMatch[2].trim() : 'Dikeluarkan oleh Owner via WhatsApp';
+                    const { removeUser } = require('./securityService');
+                    const resKick = await removeUser({
+                        identifier: targetId,
+                        requestedBy: internalUserId || fromNumber,
+                        reason,
+                    });
+                    await sendWhatsAppTextMessage(fromNumber, resKick.message);
+                    continue;
+                }
+
+                // 5. Antrean Broadcast Terjadwal (!broadcast jadwal list / !broadcast antrean - Khusus Owner)
+                if (/^!(?:broadcast|pengumuman)\s+(?:jadwal\s+list|antrean|queue)$/i.test(textContent.trim())) {
+                    if (!isOwner) {
+                        await sendWhatsAppTextMessage(fromNumber, '⛔ Fitur broadcast eksklusif hanya dapat diakses oleh Owner.');
+                        continue;
+                    }
+                    const { listScheduledBroadcasts, formatWIBDateTime } = require('./broadcastService');
+                    const list = await listScheduledBroadcasts({ status: 'PENDING', limit: 10 });
+                    if (list.length === 0) {
+                        await sendWhatsAppTextMessage(fromNumber, '📭 Tidak ada jadwal broadcast dalam antrean saat ini.');
+                    } else {
+                        let out = `📅 *[ANTREAN BROADCAST TERJADWAL]*\n\n`;
+                        list.forEach((b) => {
+                            out += `• *ID #${b.id}* — ⏰ ${formatWIBDateTime(new Date(b.scheduled_at))}\n`;
+                            out += `  Saluran: *${b.target_channel}* | Role: *${b.target_role || 'SEMUA'}*\n`;
+                            out += `  Pesan: _"${b.message.substring(0, 80)}${b.message.length > 80 ? '...' : ''}"_\n\n`;
+                        });
+                        out += `💡 *Batalkan jadwal:* \`!broadcast batal <id>\``;
+                        await sendWhatsAppTextMessage(fromNumber, out);
+                    }
+                    continue;
+                }
+
+                // 6. Batalkan Broadcast Terjadwal (!broadcast batal <id> - Khusus Owner)
+                const cancelBcMatch = textContent.match(/^!(?:broadcast|pengumuman)\s+(?:batal|cancel)\s+(\d+)$/i);
+                if (cancelBcMatch) {
+                    if (!isOwner) {
+                        await sendWhatsAppTextMessage(fromNumber, '⛔ Fitur broadcast eksklusif hanya dapat diakses oleh Owner.');
+                        continue;
+                    }
+                    const schedId = parseInt(cancelBcMatch[1], 10);
+                    const { cancelScheduledBroadcast } = require('./broadcastService');
+                    const resCancel = await cancelScheduledBroadcast(schedId, internalUserId || fromNumber);
+                    await sendWhatsAppTextMessage(fromNumber, resCancel.success ? resCancel.message : `❌ Gagal: ${resCancel.error}`);
+                    continue;
+                }
+
+                // 7. Pengiriman Broadcast (Instan maupun Terjadwal - Khusus Owner)
+                const broadcastMatch = textContent.match(/^!(?:broadcast|pengumuman|siarkan)\s+([\s\S]+)$/i)
+                    || textContent.match(/^(?:amba\s+)?broadcast[:\s]+([\s\S]+)$/i);
 
                 if (broadcastMatch) {
-                    const userRole = resolved.user?.role || 'USER';
-                    const isAuth = fromNumber === '6288991185737' || userRole === 'OWNER' || userRole === 'ADMIN';
-                    if (!isAuth) {
+                    if (!isOwner) {
                         await sendWhatsAppTextMessage(
                             fromNumber,
-                            `⛔ Maaf ${senderName}, fitur broadcast hanya dapat digunakan oleh Owner atau Admin Jarvis.`
+                            `⛔ Maaf ${senderName}, fitur broadcast (instan maupun terjadwal) eksklusif hanya dapat digunakan oleh Owner Jarvis.`
                         );
                         continue;
                     }
 
-                    let target = (broadcastMatch[1] || 'ALL').toUpperCase();
-                    if (target === 'WA') target = 'WHATSAPP';
-                    const bMessage = broadcastMatch[2].trim();
+                    const rawPayload = broadcastMatch[1].trim();
+                    const {
+                        parseBroadcastInput,
+                        parseScheduleTime,
+                        createScheduledBroadcast,
+                        broadcastMessage,
+                    } = require('./broadcastService');
 
-                    await sendWhatsAppTextMessage(fromNumber, `📢 Sedang menyiarkan pesan ke seluruh pengguna (${target})...`);
+                    const parsed = parseBroadcastInput(rawPayload);
 
-                    const { broadcastMessage } = require('./broadcastService');
+                    if (!parsed.message) {
+                        await sendWhatsAppTextMessage(
+                            fromNumber,
+                            `❌ Pesan broadcast tidak boleh kosong.\n\nContoh:\n• Instan: \`!broadcast wa Halo semuanya!\`\n• Terjadwal: \`!broadcast jadwal 10m wa Pengumuman dalam 10 menit\`\n• Kontak Tertentu: \`!broadcast to:6288991185737 Halo Bos!\``
+                        );
+                        continue;
+                    }
+
+                    // A. Kasus Terjadwal
+                    if (parsed.isScheduled) {
+                        const timeParsed = parseScheduleTime(parsed.scheduleTimeStr);
+                        if (!timeParsed.success) {
+                            await sendWhatsAppTextMessage(fromNumber, `❌ Gagal menjadwalkan: ${timeParsed.error}`);
+                            continue;
+                        }
+
+                        const schedRes = await createScheduledBroadcast({
+                            createdBy: internalUserId || fromNumber,
+                            message: parsed.message,
+                            targetChannel: parsed.targetChannel,
+                            targetRole: parsed.targetRole,
+                            targetRecipients: parsed.targetRecipients,
+                            scheduledAt: timeParsed.date,
+                        });
+
+                        if (schedRes.success) {
+                            let confirmMsg = `📅 *[BROADCAST BERHASIL DIJADWALKAN]*\n`;
+                            confirmMsg += `• ID Jadwal: *#${schedRes.broadcast.id}*\n`;
+                            confirmMsg += `• Waktu Kirim: *${schedRes.formattedTime}*\n`;
+                            confirmMsg += `• Target Saluran: *${parsed.targetChannel}*\n`;
+                            if (parsed.targetRole) confirmMsg += `• Target Role: *${parsed.targetRole}*\n`;
+                            if (parsed.targetRecipients) confirmMsg += `• Kontak Khusus: *${parsed.targetRecipients.length}* nomor/ID\n`;
+                            confirmMsg += `• Isi Pesan: _"${parsed.message.substring(0, 100)}"_\n\n`;
+                            confirmMsg += `_Amba akan otomatis menyiarkan pesan tepat pada waktu tersebut!_ 🫡`;
+                            await sendWhatsAppTextMessage(fromNumber, confirmMsg);
+                        } else {
+                            await sendWhatsAppTextMessage(fromNumber, `❌ Gagal menjadwalkan broadcast: ${schedRes.error}`);
+                        }
+                        continue;
+                    }
+
+                    // B. Kasus Instan
+                    await sendWhatsAppTextMessage(fromNumber, `📢 Sedang menyiarkan pesan ke seluruh pengguna (${parsed.targetChannel})...`);
+
                     const bRes = await broadcastMessage({
-                        message: bMessage,
-                        targetChannel: target,
-                        senderUserId: internalUserId,
+                        message: parsed.message,
+                        targetChannel: parsed.targetChannel,
+                        targetRole: parsed.targetRole,
+                        targetRecipients: parsed.targetRecipients,
+                        senderUserId: internalUserId || fromNumber,
                     });
 
                     if (bRes.success) {
-                        await sendWhatsAppTextMessage(
-                            fromNumber,
-                            `✅ *Broadcast Berhasil Disiarkan!*\n• Target Channel: *${target}*\n• Terkirim: *${bRes.delivered}* pengguna\n• Gagal: *${bRes.failed}* pengguna\n• Total Terdaftar: *${bRes.total}* akun`
-                        );
+                        let rep = `✅ *[BROADCAST SELESAI DISIARKAN]*\n`;
+                        rep += `• Target Saluran: *${parsed.targetChannel}*\n`;
+                        if (parsed.targetRole) rep += `• Target Role: *${parsed.targetRole}*\n`;
+                        rep += `• Terkirim: *${bRes.delivered}* pengguna\n`;
+                        rep += `• Gagal: *${bRes.failed}* pengguna\n`;
+                        rep += `• Total Terdaftar: *${bRes.total}* akun`;
+                        await sendWhatsAppTextMessage(fromNumber, rep);
                     } else {
                         await sendWhatsAppTextMessage(fromNumber, `❌ Gagal broadcast: ${bRes.error}`);
                     }
@@ -555,6 +850,7 @@ ATURAN WAJIB MODE SUARA:
                             callsign: callsign || null,
                             preferredGreetingName: callsign || userDisplayName,
                             hasCustomCallsign: Boolean(callsign),
+                            role: isOwner ? 'OWNER' : (resolved.user?.role || 'USER'),
                         },
                         userMemories: userMemories,
                         message: {
@@ -579,6 +875,25 @@ ATURAN WAJIB MODE SUARA:
                         const replyText = n8nData.replyText || n8nData.text || n8nData.response?.text || '';
 
                         if (replyText) {
+                            // Cek apakah balasan AI mengandung rancangan task_plan (Task Berkelanjutan / Bertingkat)
+                            const { cleanText: textWithoutPlan, plan } = taskChainService.extractTaskPlanFromAiResponse(replyText);
+                            if (plan && Array.isArray(plan.actions) && plan.actions.length > 0) {
+                                console.log(`📋 [WhatsApp TaskChain] AI mengusulkan ${plan.actions.length} langkah aksi: "${plan.title || 'Rencana Tugas'}"`);
+                                const chain = await taskChainService.createTaskChain({
+                                    userId: internalUserId || fromNumber,
+                                    channelType: 'WHATSAPP',
+                                    channelId: `wa_${fromNumber}`,
+                                    title: plan.title || 'Rencana Tugas Berkelanjutan',
+                                    description: plan.summary || textWithoutPlan,
+                                    category: plan.category || 'MULTI_STEP_TASK',
+                                    proposedPlan: plan,
+                                });
+
+                                const proposalText = taskChainService.formatTaskChainProposalText(chain, userDisplayName);
+                                await sendWhatsAppTextMessage(fromNumber, proposalText);
+                                continue;
+                            }
+
                             if (wantsVoice) {
                                 let voiceSent = false;
                                 try {

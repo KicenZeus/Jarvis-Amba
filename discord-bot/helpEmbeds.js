@@ -864,6 +864,161 @@ function getHealthStatusEmbed(data) {
     return embed;
 }
 
+/**
+ * Embed Daftar Jadwal & Agenda (Schedules)
+ */
+function getSchedulesEmbed(schedules, userName = 'Bos') {
+    const embed = new EmbedBuilder()
+        .setColor(0x3498DB) // Soft Blue
+        .setTitle('📅 AGENDA & JADWAL KEGIATAN')
+        .setDescription(
+            `Berikut adalah daftar agenda acara, rapat, dan kegiatan terjadwal milik **${userName}**.\n` +
+            `*Catat baru:* \`amba catat jadwal rapat besok jam 2 siang di Google Meet prioritas tinggi\``
+        );
+
+    if (!schedules || schedules.length === 0) {
+        embed.addFields({
+            name: 'ℹ️ Tidak Ada Jadwal Aktif',
+            value: 'Belum ada agenda kegiatan yang tersimpan. Kamu bisa minta Amba untuk mencatat jadwal rapat, kuliah, atau acara lainnya!',
+            inline: false,
+        });
+    } else {
+        schedules.forEach((s, idx) => {
+            const prio = (s.priority || 'MEDIUM').toUpperCase();
+            const badge = prio === 'URGENT' ? '🔴 [URGENT]' : prio === 'HIGH' ? '🟠 [HIGH]' : prio === 'LOW' ? '🟢 [LOW]' : '🟡 [MED]';
+            const startDate = new Date(s.start_time);
+            const dateStr = new Intl.DateTimeFormat('id-ID', {
+                timeZone: 'Asia/Jakarta',
+                weekday: 'short',
+                day: 'numeric',
+                month: 'short',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false,
+            }).format(startDate);
+
+            let timeSpan = `${dateStr} WIB`;
+            if (s.end_time) {
+                const endStr = new Intl.DateTimeFormat('id-ID', {
+                    timeZone: 'Asia/Jakarta',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: false,
+                }).format(new Date(s.end_time));
+                timeSpan += ` - ${endStr} WIB`;
+            }
+
+            const loc = s.location ? `\n📍 **Lokasi/Link:** ${s.location}` : '';
+            const desc = s.description ? `\n💬 *${s.description}*` : '';
+
+            embed.addFields({
+                name: `${idx + 1}. ${badge} ${s.title}`,
+                value: `⏰ **Waktu:** \`${timeSpan}\`${loc}${desc}`,
+                inline: false,
+            });
+        });
+    }
+
+    embed.setFooter({ text: BOT_FOOTER }).setTimestamp();
+    return embed;
+}
+
+/**
+ * Embed Daftar Tugas (Tasks / To-Do List)
+ */
+function getTasksEmbed(tasks, userName = 'Bos') {
+    const embed = new EmbedBuilder()
+        .setColor(0x2ECC71) // Green
+        .setTitle('📋 DAFTAR TUGAS & TO-DO LIST')
+        .setDescription(
+            `Berikut adalah daftar pekerjaan dan tugas yang harus diselesaikan oleh **${userName}**.\n` +
+            `*Catat baru:* \`amba catat tugas bikin laporan keuangan prioritas urgent\``
+        );
+
+    if (!tasks || tasks.length === 0) {
+        embed.addFields({
+            name: '✨ Semua Beres!',
+            value: 'Tidak ada tugas yang tertunda saat ini. Kerja bagus, atau santai sejenak! ☕',
+            inline: false,
+        });
+    } else {
+        tasks.forEach((t, idx) => {
+            const prio = (t.priority || 'MEDIUM').toUpperCase();
+            const badge = prio === 'URGENT' ? '🔴 [URGENT]' : prio === 'HIGH' ? '🟠 [HIGH]' : prio === 'LOW' ? '🟢 [LOW]' : '🟡 [MED]';
+            const statusBadge = t.status === 'in_progress' ? '⏳ Sedang Dikerjakan' : '📋 Pending';
+            let dueStr = '';
+            if (t.due_at) {
+                const dueDate = new Date(t.due_at);
+                const dStr = new Intl.DateTimeFormat('id-ID', {
+                    timeZone: 'Asia/Jakarta',
+                    day: 'numeric',
+                    month: 'short',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: false,
+                }).format(dueDate);
+                dueStr = `\n⏰ **Batas Waktu:** \`${dStr} WIB\``;
+            }
+            const desc = t.description ? `\n💬 *${t.description}*` : '';
+
+            embed.addFields({
+                name: `${idx + 1}. ${badge} ${t.title}`,
+                value: `Status: **${statusBadge}**${dueStr}${desc}`,
+                inline: false,
+            });
+        });
+    }
+
+    embed.setFooter({ text: BOT_FOOTER }).setTimestamp();
+    return embed;
+}
+
+/**
+ * Embed Daftar Pengingat (Reminders / Alarms)
+ */
+function getRemindersEmbed(reminders, userName = 'Bos') {
+    const embed = new EmbedBuilder()
+        .setColor(0xF1C40F) // Yellow / Gold
+        .setTitle('⏰ DAFTAR PENGINGAT & ALARM AKTIF')
+        .setDescription(
+            `Berikut adalah alarm notifikasi proaktif yang akan mencolek **${userName}** saat waktu jatuh tempo.\n` +
+            `*Pasang baru:* \`amba ingetin jam 13.00 makan siang prioritas tinggi\``
+        );
+
+    if (!reminders || reminders.length === 0) {
+        embed.addFields({
+            name: 'ℹ️ Tidak Ada Pengingat Aktif',
+            value: 'Belum ada alarm pengingat aktif yang terjadwal. Kamu bisa minta Amba untuk mengingatkan kegiatan penting!',
+            inline: false,
+        });
+    } else {
+        reminders.forEach((r, idx) => {
+            const prio = (r.priority || 'MEDIUM').toUpperCase();
+            const badge = prio === 'URGENT' ? '🔴 [URGENT]' : prio === 'HIGH' ? '🟠 [HIGH]' : prio === 'LOW' ? '🟢 [LOW]' : '🟡 [MED]';
+            const remindDate = new Date(r.remind_at);
+            const dateStr = new Intl.DateTimeFormat('id-ID', {
+                timeZone: 'Asia/Jakarta',
+                weekday: 'short',
+                day: 'numeric',
+                month: 'short',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false,
+            }).format(remindDate);
+
+            embed.addFields({
+                name: `${idx + 1}. ${badge} [${dateStr} WIB]`,
+                value: `💬 *${r.title}*`,
+                inline: false,
+            });
+        });
+    }
+
+    embed.setFooter({ text: BOT_FOOTER }).setTimestamp();
+    return embed;
+}
+
 module.exports = {
     getMainHelpEmbed,
     getMusicHelpEmbed,
@@ -880,5 +1035,8 @@ module.exports = {
     getAuditLogsEmbed,
     getSecurityStatusEmbed,
     getHealthStatusEmbed,
+    getSchedulesEmbed,
+    getTasksEmbed,
+    getRemindersEmbed,
     BOT_FOOTER,
 };

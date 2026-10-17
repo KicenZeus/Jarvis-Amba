@@ -16,8 +16,9 @@
 6. [Cara Mengubah Profil, Nickname, Foto & Biodata](#6-cara-mengubah-profil-nickname-foto--biodata)
 7. [Solusi Domain Statis Permanen (Opsional - Bebas Ganti URL)](#7-solusi-domain-statis-permanen-opsional)
 8. [Checklist Uji Coba End-to-End](#8-checklist-uji-coba-end-to-end)
-9. [Fitur Broadcast & Pengumuman Massal (WhatsApp & Discord)](#9-fitur-broadcast--pengumuman-massal-whatsapp--discord)
-10. [Perintah Penting Pemeliharaan & Debugging](#10-perintah-penting-pemeliharaan--debugging)
+9. [Sistem Hak Akses Multi-Role (RBAC) & Gatekeeping Anti-Spam](#9-sistem-hak-akses-multi-role-rbac--gatekeeping-anti-spam)
+10. [Fitur Broadcast & Pengumuman Massal (Instan & Terjadwal)](#10-fitur-broadcast--pengumuman-massal-instan--terjadwal)
+11. [Perintah Penting Pemeliharaan & Debugging](#11-perintah-penting-pemeliharaan--debugging)
 
 ---
 
@@ -265,89 +266,237 @@ Setelah URL tersambung di Meta Dashboard, lakukan uji coba langsung dari WhatsAp
 
 ---
 
-## 9. Fitur Broadcast & Pengumuman Massal (WhatsApp & Discord)
+## 9. Sistem Hak Akses Multi-Role (RBAC) & Gatekeeping Anti-Spam
 
-Jarvis Amba memiliki kemampuan menyiarkan pengumuman atau pesan penting **secara serentak** ke seluruh pengguna yang sudah pernah berinteraksi/terdaftar di WhatsApp maupun Discord.
+Untuk menjaga keamanan kuota LLM (Google Gemini Flash), kestabilan memori database, dan privasi asisten, Jarvis V2.1 menerapkan sistem otorisasi Role-Based Access Control (RBAC) lintas WhatsApp dan Discord.
 
-Pesan yang dikirimkan diformat secara personal dan sopan:
+### 🛡️ Matriks Hak Akses Per Role:
+
+| Role | Level | Hak Akses Fitur WhatsApp & Discord | Siapa yang Dapat Mendaftarkan? |
+| :--- | :---: | :--- | :--- |
+| **👑 OWNER** | Level 4 | **Akses Total (Superuser):**<br>• Manajemen role (`!role set`, `!role list`)<br>• Pendaftaran user baru (`!daftar`)<br>• Broadcast instan & terjadwal (`!broadcast`)<br>• Seluruh tool AI, task, reminder, finance, memory, dan system | Ditetapkan mutlak untuk Owner (`kicenzeus`, Discord Snowflake `713137141072396370` / `344840856006459392`, WhatsApp `6288991185737`). |
+| **🛡️ ADMIN** | Level 3 | **Operasional & Pengawasan:**<br>• Cek role pengguna lain (`!role check`)<br>• Akses audit log & kesehatan sistem<br>• Seluruh fitur AI pribadi (Task, Reminder, Finance, Vision, Web Search, Audio/TTS) | **Hanya OWNER** |
+| **👥 USER** | Level 2 | **Asisten AI Pribadi Lengkap:**<br>• Chat AI percakapan cerdas (n8n LangChain)<br>• Pencatatan tugas & jadwal pengingat (Reminder)<br>• Catatan keuangan & memori pribadi<br>• Voice note & sintesis audio TTS | **Hanya OWNER** |
+| **👤 GUEST / Belum Terdaftar** | Level 1 | **Tamu & Pengguna Baru:**<br>• **WhatsApp:** Dihentikan di gerbang adapter (tidak diteruskan ke n8n). Menerima 1x pesan singkat untuk mendaftar ke Owner.<br>• **Discord Server:** **BEBAS menggunakan bot musik di voice channel** (`!play`, `!skip`, `!queue`, `!pause`, dll.) dan `!help`. Namun chat AI privat dibatasi.<br>• Anti-Spam Debounce: 12 jam (tidak akan membanjiri chat jika spam chat). | Tamu umum / nomor atau ID Discord yang belum didaftarkan oleh Owner. |
+
+---
+
+### 🚪 Mekanisme Gatekeeping (Hemat Kuota & Anti-Banjir Token)
+Sebelumnya, setiap pesan masuk dari WhatsApp otomatis didaftarkan sebagai `USER`, yang berisiko menghabiskan token Gemini jika ada nomor asing/iseng yang mengirim pesan berulang kali.
+
+**Di V2.1:**
+1. **WhatsApp Adapter:** Nomor asing yang belum ada di database akan **langsung ditolak di batas adapter** tanpa memicu eksekusi AI di n8n.
+2. Bot hanya membalas **1 kali pesan sopan**:
+   > *"Halo! Nomor Anda belum terdaftar dalam sistem akses Jarvis Amba. Untuk pendaftaran atau izin akses, silakan hubungi Owner (KicenZeus). Terima kasih! 🙏"*
+3. Sistem mengaktifkan **debounce 12 jam**: Jika nomor tersebut terus mengirim pesan, bot tidak akan merespon lagi agar kuota Meta Cloud API dan log tidak dipenuhi spam.
+4. **Discord Channel Guild (Server Publik):**
+   - Perintah musik (`!play`, `!skip`, `!queue`, `!pause`, `!resume`, `!stop`, `!help`) **dapat dipakai oleh SIAPAPUN** di dalam channel server.
+   - Panggilan AI pribadi oleh akun non-terdaftar akan dibalas 1x pesan singkat bahwa musik tetap bebas dipakai, namun akses AI privat memerlukan izin Owner.
+
+---
+
+### 📝 Perintah Manajemen Role & Pendaftaran Pengguna (Khusus Owner)
+
+Perintah ini dapat diketikkan langsung di **Discord** (DM atau Channel) maupun di **WhatsApp**:
+
+#### 1. Mendaftarkan Pengguna Baru
+```text
+!daftar <nomor_wa_atau_id_discord> <nama_panggilan> [ROLE]
+```
+*Contoh:*
+- WhatsApp: `!daftar 628123456789 Budi USER`
+- Discord: `!daftar 841158598465159169 Andi ADMIN`
+*(Jika role tidak ditulis, otomatis menjadi `USER`)*
+
+#### 2. Mengubah Role Pengguna yang Sudah Ada
+```text
+!role set <nomor_atau_id_atau_@mention> <ROLE> [catatan]
+```
+*Contoh:*
+- `!role set 628123456789 ADMIN Promosi tim inti`
+- `!role set @Budi USER`
+
+#### 3. Melihat Daftar Pengguna Terdaftar
+```text
+!role list
+```
+Menampilkan seluruh pengguna terdaftar, nomor WhatsApp/Discord ID, role aktif, dan waktu interaksi terakhir.
+
+#### 4. Menghapus / Mengeluarkan Pengguna dari Database (Kick User)
+```text
+!kick <nomor_wa_atau_id_discord_atau_@mention> [alasan]
+```
+*Alias perintah:* `!hapus <target>`, `!user kick <target>`, `!role remove <target>`  
+*Contoh:*
+- Hapus user WhatsApp: `!kick 628123456789 Melanggar aturan`
+- Hapus user Discord: `!kick 841158598465159169` atau `!kick @Andi`
+- Akun yang di-kick akan **dihapus permanen dari database** dan hak perannya dicabut (kembali menjadi GUEST). Pesan mereka selanjutnya di WhatsApp maupun Discord akan **ditolak oleh gerbang anti-spam** sehingga tidak dapat mengakses bot AI lagi.
+- *Catatan Keamanan:* Akun Owner utama (`kicenzeus`) dilindungi secara mutlak dan tidak dapat dihapus oleh siapa pun.
+
+#### 5. Mengecek Role Diri Sendiri
+```text
+!myrole
+```
+Dapat dijalankan oleh **siapa saja** untuk melihat role akun saat ini.
+
+---
+
+## 10. Fitur Broadcast & Pengumuman Massal (Instan & Terjadwal)
+
+Jarvis Amba memiliki kemampuan menyiarkan pengumuman atau pesan penting **secara serentak** maupun **terjadwal (reminder broadcast)** ke pengguna terdaftar di WhatsApp dan Discord.
+
+> [!IMPORTANT]
+> Fitur Broadcast (instan maupun terjadwal) **100% eksklusif hanya untuk OWNER** demi mencegah penyalahgunaan.
+
+### Format Pesan Broadcast Otomatis:
 ```text
 📢 *[PENGUMUMAN JARVIS AMBA]*
-Halo <Nama/Callsign Pengguna>!
+Halo <Nama Pengguna>!
 
 <Isi pesan pengumuman Anda>
 
 — Salam hangat, Asisten Jarvis Amba
 ```
 
-> [!NOTE]
-> Fitur ini **diproteksi secara ketat**. Hanya akun dengan role **OWNER** atau **ADMIN** (seperti `kicenzeus` / nomor `6288991185737`) yang diizinkan memicu pengiriman broadcast.
+---
 
-### Pilihan Cara Mengirim Broadcast:
-
-#### Cara 1: Langsung dari WhatsApp (Paling Praktis) 📱
-Kirim chat ke nomor bot Jarvis dari nomor WhatsApp Owner (`6288991185737`):
-- Ke SEMUA pengguna (WhatsApp & Discord):
-  ```text
-  !broadcast Besok malam bot akan maintenance pembaruan fitur ya!
-  ```
-  atau
-  ```text
-  amba broadcast: Besok malam bot akan maintenance pembaruan fitur ya!
-  ```
-- Khusus pengguna WhatsApp saja:
-  ```text
-  !broadcast wa Info kuota WhatsApp bot sudah diperbarui!
-  ```
-- Khusus pengguna Discord saja:
-  ```text
-  !broadcast discord Ayo kumpul di Voice Channel malam ini!
-  ```
-Amba akan otomatis membalas laporan pengiriman real-time: jumlah terkirim, gagal, dan total akun terdaftar.
+### ⏰ Opsi Penjadwalan Waktu (Scheduler):
+Sistem mendukung 3 format waktu jadwal yang fleksibel (Zona WIB):
+- **Format Relatif:** `10m` (10 menit lagi), `1h` (1 jam lagi), `2d` (2 hari lagi).
+- **Format Jam WIB:** `15:30` atau `08:00` (dieksekusi pada jam tersebut hari ini, atau besok jika jam sudah terlewat).
+- **Format Tanggal Lengkap:** `2026-10-17 09:30` (tahun-bulan-tanggal jam:menit).
 
 ---
 
-#### Cara 2: Langsung dari Discord Server / DM 💬
-Di channel server Discord atau DM bot Amba (oleh Owner / Admin):
-- Ke SEMUA pengguna:
+### 🎯 Opsi Filter Target Pengiriman:
+- **Saluran:** `ALL` (WhatsApp & Discord), `wa` (hanya WhatsApp), `discord` (hanya Discord).
+- **Role Pengguna:** `role:admin`, `role:user`, `role:owner`.
+- **Kontak Tertentu:** `to:6288991185737,841158598465159169` (pisahkan koma).
+
+---
+
+### 📱 Cara Eksekusi Broadcast via Chat (WhatsApp / Discord):
+
+#### A. Broadcast Instan (Kirim Detik Ini Juga)
+- Ke semua pengguna:
   ```text
-  !broadcast Halo kawan-kawan, ada fitur suara baru di Amba nih!
+  !broadcast Halo semuanya, bot online kembali!
   ```
 - Ke WhatsApp saja:
   ```text
-  !broadcast wa Pengingat jadwal untuk tim WhatsApp
+  !broadcast wa Info pembaruan fitur WhatsApp!
   ```
-- Ke Discord saja:
+- Ke kontak tertentu saja:
   ```text
-  !broadcast discord Pengumuman khusus member Discord
+  !broadcast to:6288991185737,628123456789 Halo Bos dan Tim!
+  ```
+- Ke role tertentu saja:
+  ```text
+  !broadcast role:admin Rapat tim admin malam ini jam 20.00 WIB
   ```
 
+#### B. Broadcast Terjadwal (Scheduled Reminder)
+- Kirim 15 menit lagi ke semua:
+  ```text
+  !broadcast jadwal 15m Jangan lupa submit laporan harian ya!
+  ```
+- Kirim pada jam 21:00 WIB ke pengguna WhatsApp:
+  ```text
+  !broadcast jadwal 21:00 wa Selamat istirahat semuanya!
+  ```
+- Kirim pada tanggal spesifik ke kontak tertentu:
+  ```text
+  !broadcast jadwal 2026-10-17 08:00 to:6288991185737 Selamat pagi Bos, jadwal audit sistem hari ini.
+  ```
+
+#### C. Memantau & Membatalkan Antrean Jadwal
+- **Melihat antrean jadwal:**
+  ```text
+  !broadcast jadwal list
+  ```
+- **Membatalkan jadwal:**
+  ```text
+  !broadcast batal <ID_JADWAL>
+  ```
+  *Contoh:* `!broadcast batal 3`
+
 ---
 
-#### Cara 3: Sekali Klik dari PC Windows (`broadcast.bat`) 💻 ⭐
-Jika Anda sedang di depan PC dan ingin mengirim pengumuman tanpa membuka chat:
+### 💻 Cara Eksekusi via PC Windows (`broadcast.bat`) ⭐
+
 1. Double-click file **`broadcast.bat`** di folder project (`D:\Dev\project\n8n\Jarvis`).
-2. Masukkan pesan pengumuman yang ingin disiarkan.
-3. Pilih saluran tujuan:
-   - `1` = SEMUA SALURAN (WhatsApp & Discord)
-   - `2` = Hanya WhatsApp
-   - `3` = Hanya Discord
-4. Tekan `y` untuk konfirmasi. Laporan detail pengiriman per user akan langsung muncul di layar terminal CMD!
+2. Muncul menu interaktif 5 pilihan:
+   ```text
+   ======================================================
+   📢  JARVIS AMBA - BROADCAST & PENGUMUMAN MASSAL
+   ======================================================
+   Pilih Menu:
+     1. 📢 Kirim Broadcast Instan (Kirim Sekarang)
+     2. ⏰ Jadwalkan Broadcast (Terjadwal / Reminder)
+     3. 📋 Lihat Daftar Jadwal Broadcast
+     4. ❌ Batalkan Jadwal Broadcast
+     5. 👥 Kelola Pengguna (Lihat Daftar & Hapus/Kick User)
+     6. 🚪 Keluar
+   ```
+3. **Pemilihan Penerima Tanpa Perlu Mengetik Nomor Manual:**
+   - Setelah memilih saluran tujuan (ALL / WhatsApp / Discord), sistem otomatis mengambil data pengguna aktif dan menampilkan pilihannya:
+     - **Mode 1: SEMUA USER** — Menampilkan seluruh kontak lengkap dengan nomor urut, platform, nomor WA / Discord ID, nama, dan role:
+       ```text
+       📋 DAFTAR KONTAK TERDAFTAR (Saluran: ALL)
+         (1) [WHATSAPP] 6288991185737    KicenZeus          👑 OWNER
+         (2) [DISCORD ] 713137141072396370 KicenZeus          👑 OWNER
+         (3) [DISCORD ] 1327340161675300949 𝚟𝚎𝚌𝚔𝚊𝚊       🛡️ ADMIN
+         (4) [DISCORD ] 841158598465159169 boomer             🛡️ ADMIN
+         (5) [WHATSAPP] 6281359944500    Firstyan Ferdi     👥 USER
+       ```
+       *Kirim ke semua:* Tekan **ENTER** atau ketik `SEMUA`.  
+       *Pilih kontak tertentu:* Cukup ketik nomor urutnya (misal: `1, 5` atau `3, 4`). Tidak perlu memasukkan nomor HP atau Snowflake ID secara manual!
+     - **Mode 2: Filter per ROLE** — Menampilkan hanya kontak dengan role yang dipilih (misal: `ADMIN`), dengan nomor urut `(1)`, `(2)`, dst. yang bisa dipilih nomornya atau langsung dikirimkan ke seluruh admin.
 
----
-
-#### Cara 4: Via Terminal CLI
+#### Atau via Terminal CLI Langsung:
 ```bash
-# Kirim ke semua saluran
-node scripts/broadcast.js "Halo semuanya, server online kembali!"
+# Lihat antrean jadwal aktif
+node scripts/broadcast.js --list
 
-# Kirim ke saluran tertentu
-node scripts/broadcast.js --target=wa "Khusus pengguna WhatsApp"
-node scripts/broadcast.js --target=discord "Khusus pengguna Discord"
+# Jadwalkan broadcast 30 menit lagi
+node scripts/broadcast.js --message "Tes reminder" --schedule "30m" --target ALL
+
+# Batalkan jadwal nomor 3
+node scripts/broadcast.js --cancel 3
 ```
 
 ---
 
-## 10. Perintah Penting Pemeliharaan & Debugging
+## 11. Fitur Bantuan Chat Natural Amba (Conversational Command Help) & RBAC Privacy Guard ⭐
+
+Pengguna dapat bertanya langsung kepada Amba di chat WhatsApp maupun Discord mengenai cara kerja atau perintah seputar bot. Amba akan menjawab dengan gaya obrolan natural yang santai dan ramah, **dengan proteksi privasi mutlak berdasarkan Role pengguna (RBAC Privacy Guard)**:
+
+### 🛡️ Kebijakan Privasi Perintah Berdasarkan Role:
+1. **👑 Khusus OWNER (Developer kicenzeus):**
+   - Mendapatkan panduan lengkap dan terbuka untuk seluruh perintah administrasi (`!kick`, `!daftar`, `!role set`, `!role list`, `!broadcast`, menu PC `broadcast.bat`, dll).
+2. **🛡️ Khusus ADMIN:**
+   - **HANYA** diberikan informasi perintah yang merupakan hak akses role Admin (`!audit`, `!security`, `!myrole`, musik Discord, dan fitur operasional asisten).
+   - Jika Admin bertanya tentang perintah `!kick`, `!daftar`, `!role set`, atau `!broadcast`: Amba **TIDAK AKAN** membocorkan perintah tersebut dan secara sopan menegaskan bahwa wewenang tersebut privat untuk Owner/Developer demi keamanan sistem.
+3. **👥 Pengguna Biasa (USER / GUEST):**
+   - **HANYA** diberikan informasi fitur pengguna biasa (chat AI, reminder pribadi, task pribadi, catatan, keuangan, suara/VN, `!myrole`, dan musik Discord).
+   - Jika User biasa bertanya cara kick, cara daftar, cara ubah role, atau broadcast: Amba **DILARANG KERAS** memberikan format perintahnya (`!kick`, `!daftar`, dll.), melainkan menjelaskan secara santai dan sopan bahwa fitur tersebut merupakan privasi developer/owner dan mengarahkan mereka untuk menghubungi Owner.
+
+### Contoh Tanggapan Amba Sesuai Role:
+- **Jika USER Biasa Tanya Kick/Role:**
+  > **User (USER):** *"amba gimana cara kick orang?"*  
+  > **Amba:** *"Halo! Fitur manajemen pengguna, pengaturan role, dan broadcast pesan merupakan fitur privat yang dikhususkan khusus untuk **Developer / Owner** bot (kicenzeus), jadi pengguna biasa nggak punya akses ke perintah tersebut. Kalau ada laporan penting atau teman yang mau didaftarkan, langsung hubungi Owner ya!"*
+
+- **Jika ADMIN Tanya Kick/Role:**
+  > **Admin (ADMIN):** *"amba gimana cara kick orang?"*  
+  > **Amba:** *"Halo! Perintah buat kick atau hapus pengguna dari sistem itu merupakan wewenang privat khusus **Owner / Developer** bot. Sebagai Admin, kamu punya akses ke perintah operasional seperti `!audit`, `!security`, `!myrole`, serta manajemen task & reminder. Kalau ada user yang perlu dikeluarkan, silakan koordinasikan ke Owner ya!"*
+
+- **Jika OWNER Tanya Kick/Role:**
+  > **Owner (OWNER):** *"amba gimana cara kick orang?"*  
+  > **Amba:** Menjelaskan secara lengkap: format `!kick <target> [alasan]`, contoh Discord & WA, alias `!hapus`, dan opsi menu 5 di terminal `broadcast.bat` PC.
+
+---
+
+## 12. Perintah Penting Pemeliharaan & Debugging
 
 Semua perintah dijalankan di terminal folder project (`D:\Dev\project\n8n\Jarvis`):
 
@@ -355,8 +504,8 @@ Semua perintah dijalankan di terminal folder project (`D:\Dev\project\n8n\Jarvis
 # 1. Melihat status seluruh container:
 docker compose ps
 
-# 2. Melihat log WhatsApp & Discord bot:
-docker logs --tail 25 -f jarvis-bot
+# 2. Melihat log WhatsApp & Discord bot secara real-time:
+docker logs --tail 30 -f jarvis-bot
 
 # 3. Melihat log tunnel Cloudflare:
 docker logs --tail 25 jarvis-tunnel
@@ -367,10 +516,14 @@ docker logs --tail 25 jarvis-n8n
 # 5. Rebuild bot setelah ada perubahan kode lokal:
 docker compose up -d --build bot
 
-# 6. Memeriksa daftar user terdaftar di database:
-docker compose exec bot node -e "const db=require('./db'); db.query('SELECT u.id, u.display_name, uc.channel_type, uc.external_user_id FROM users u JOIN user_channels uc ON uc.user_id = u.id').then(r=>console.table(r.rows)).then(()=>process.exit(0));"
+# 6. Memeriksa daftar jadwal broadcast pending di database:
+docker compose exec bot node -e "const db=require('./db'); db.query('SELECT id, scheduled_at, target_channel, status, message FROM scheduled_broadcasts WHERE status=\'PENDING\'').then(r=>console.table(r.rows)).then(()=>process.exit(0));"
+
+# 7. Memeriksa seluruh pengguna terdaftar dan rolenya:
+docker compose exec bot node -e "const security=require('./securityService'); security.listAllUsersWithRoles().then(r=>console.table(r)).then(()=>process.exit(0));"
 ```
 
 ---
 
 *Dokumentasi ini adalah bagian resmi dari repositori Jarvis Amba V2.1. Pertahankan dokumentasi ini tetap mutakhir setiap kali ada perubahan arsitektur.*
+

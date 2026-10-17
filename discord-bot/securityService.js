@@ -207,50 +207,42 @@ async function getUserRole(userId, forceFresh = false) {
         // 2. Cek developer/creator ID bawaan (kicenzeus)
         const isKnownDeveloper =
             userId === '713137141072396370' ||
-            userId === '344840856006459392';
+            userId === '344840856006459392' ||
+            userId === '6288991185737';
 
-        // 3. Query role secara paralel dari user_roles dan users
-        const [rRes, uRes] = await Promise.all([
+        // 3. Query role secara paralel dari user_roles, users, dan user_channels
+        const [rRes, uRes, cRes] = await Promise.all([
             db.query('SELECT role FROM user_roles WHERE discord_user_id = $1 LIMIT 1;', [userId]),
             db.query('SELECT role, display_name FROM users WHERE discord_user_id = $1 OR id = $1 LIMIT 1;', [userId]),
+            db.query('SELECT u.role, u.display_name FROM user_channels uc JOIN users u ON uc.user_id = u.id WHERE uc.external_user_id = $1 OR uc.phone_number = $1 LIMIT 1;', [userId]),
         ]);
 
         const rRole = (rRes.rows[0]?.role || '').toUpperCase();
         const uRole = (uRes.rows[0]?.role || '').toUpperCase();
-        const displayName = uRes.rows[0]?.display_name || '';
+        const cRole = (cRes.rows[0]?.role || '').toUpperCase();
+        const displayName = uRes.rows[0]?.display_name || cRes.rows[0]?.display_name || '';
 
         // Tentukan kandidat role dengan prioritas hierarki
         let resolvedRoleName = null;
 
         if (isKnownDeveloper || /kicenzeus/i.test(displayName)) {
             resolvedRoleName = 'OWNER';
-        } else if (rRole === 'OWNER' || uRole === 'OWNER') {
+        } else if (rRole === 'OWNER' || uRole === 'OWNER' || cRole === 'OWNER') {
             resolvedRoleName = 'OWNER';
-        } else if (rRole === 'ADMIN' || uRole === 'ADMIN') {
+        } else if (rRole === 'ADMIN' || uRole === 'ADMIN' || cRole === 'ADMIN') {
             resolvedRoleName = 'ADMIN';
-        } else if (rRole === 'BLOCKED' || uRole === 'BLOCKED') {
+        } else if (rRole === 'BLOCKED' || uRole === 'BLOCKED' || cRole === 'BLOCKED') {
             resolvedRoleName = 'BLOCKED';
-        } else if (rRole === 'USER' || uRole === 'USER') {
+        } else if (rRole === 'USER' || uRole === 'USER' || cRole === 'USER') {
             resolvedRoleName = 'USER';
-        } else if (rRole === 'GUEST' || uRole === 'GUEST') {
+        } else if (rRole === 'GUEST' || uRole === 'GUEST' || cRole === 'GUEST') {
             resolvedRoleName = 'GUEST';
         }
 
-        // Jika ditemukan role yang valid
+        // Jika ditemukan role yang valid di database
         if (resolvedRoleName && ROLES[resolvedRoleName]) {
             const matchedRole = ROLES[resolvedRoleName];
             roleCache.set(userId, { role: matchedRole.name, expiresAt: Date.now() + CACHE_TTL_MS });
-
-            // Jika ada perbedaan antar tabel atau tabel user_roles belum punya data, sinkronkan di background
-            if (rRole !== resolvedRoleName || uRole !== resolvedRoleName) {
-                db.query(`
-                    INSERT INTO user_roles (discord_user_id, role, assigned_by, notes, updated_at)
-                    VALUES ($1, $2, 'AUTO_SYNC', 'Synchronized from detected highest role', NOW())
-                    ON CONFLICT (discord_user_id) DO UPDATE SET role = EXCLUDED.role, updated_at = NOW();
-                    UPDATE users SET role = $2, updated_at = NOW() WHERE discord_user_id = $1 OR id = $1;
-                `, [userId, resolvedRoleName]).catch(() => {});
-            }
-
             return matchedRole;
         }
 
@@ -262,40 +254,30 @@ async function getUserRole(userId, forceFresh = false) {
             return ROLES.OWNER;
         }
 
-        // Cek apakah tabel user_roles masih kosong sama sekali (user pertama jadi OWNER)
-        const totalRolesRes = await db.query('SELECT COUNT(*) as count FROM user_roles');
-        const count = parseInt(totalRolesRes.rows[0]?.count || '0', 10);
-        if (count === 0) {
-            console.log(`👑 User pertama (${userId}) otomatis dijadikan OWNER sistem.`);
-            await setUserRole(userId, 'OWNER', 'AUTO_BOOTSTRAP', 'First user auto-promoted to OWNER');
-            return ROLES.OWNER;
-        }
-
-        // Cek allowlist jika diatur
-        const allowedIds = process.env.ALLOWED_USER_IDS
-            ? process.env.ALLOWED_USER_IDS.split(',').map((id) => id.trim()).filter(Boolean)
-            : [];
-
-        let defaultRoleName = 'USER';
-        if (allowedIds.length > 0 && !allowedIds.includes(userId)) {
-            defaultRoleName = 'GUEST';
-        }
-
-        // Simpan default ke DB
-        await db.query(
-            `INSERT INTO user_roles (discord_user_id, role, assigned_by, notes, created_at, updated_at)
-             VALUES ($1, $2, 'AUTO_DEFAULT', 'Initial default assignment', NOW(), NOW())
-             ON CONFLICT (discord_user_id) DO NOTHING`,
-            [userId, defaultRoleName]
-        );
-
-        const assignedRole = ROLES[defaultRoleName] || ROLES.USER;
-        roleCache.set(userId, { role: assignedRole.name, expiresAt: Date.now() + CACHE_TTL_MS });
-        return assignedRole;
+        // User belum terdaftar di database -> DEFAULT KE GUEST (Level 1)
+        // PENTING: Jangan otomatis insert sebagai USER ke DB agar tidak menuhin database & kuota
+        roleCache.set(userId, { role: ROLES.GUEST.name, expiresAt: Date.now() + CACHE_TTL_MS });
+        return ROLES.GUEST;
     } catch (err) {
         console.error('⚠️ Gagal mengambil user role dari DB:', err.message);
-        return ROLES.USER;
+        return ROLES.GUEST;
     }
+}
+
+/**
+ * Memeriksa apakah user memiliki hak akses OWNER utama
+ * @param {string} userId - ID internal, snowflake discord, atau nomor phone
+ * @returns {Promise<boolean>}
+ */
+async function isAuthorizedOwner(userId) {
+    if (!userId) return false;
+    const cleanId = String(userId).trim().replace(/\D/g, '');
+    const OWNER_IDS = ['713137141072396370', '344840856006459392', '6288991185737'];
+    if (OWNER_IDS.includes(String(userId).trim()) || OWNER_IDS.includes(cleanId)) {
+        return true;
+    }
+    const roleObj = await getUserRole(userId);
+    return roleObj.name === 'OWNER';
 }
 
 /**
@@ -312,12 +294,26 @@ async function hasMinimumRole(userId, requiredRoleName) {
  * Memperbarui role user (Hanya boleh dipanggil oleh OWNER atau Sistem)
  */
 async function setUserRole(targetUserId, newRoleName, assignedByUserId = 'SYSTEM', notes = '') {
+    if (assignedByUserId !== 'SYSTEM') {
+        const isOwner = await isAuthorizedOwner(assignedByUserId);
+        if (!isOwner) {
+            return {
+                success: false,
+                message: '⛔ Hanya **OWNER** yang memiliki hak untuk mengubah role atau mendaftarkan pengguna baru!',
+            };
+        }
+    }
+
     const upperRole = newRoleName?.toUpperCase();
     if (!ROLES[upperRole]) {
         return { success: false, message: `Role "${newRoleName}" tidak valid. Pilihan: OWNER, ADMIN, USER, GUEST, BLOCKED.` };
     }
 
     try {
+        const cleanTarget = String(targetUserId).trim();
+        const cleanPhone = cleanTarget.replace(/\D/g, '');
+
+        // 1. Simpan ke tabel user_roles
         const sql = `
             INSERT INTO user_roles (discord_user_id, role, assigned_by, notes, created_at, updated_at)
             VALUES ($1, $2, $3, $4, NOW(), NOW())
@@ -327,32 +323,274 @@ async function setUserRole(targetUserId, newRoleName, assignedByUserId = 'SYSTEM
                 notes = EXCLUDED.notes,
                 updated_at = NOW();
         `;
-        await db.query(sql, [targetUserId, upperRole, assignedByUserId, notes]);
+        await db.query(sql, [cleanTarget, upperRole, assignedByUserId, notes]);
 
-        // Update juga kolom role di tabel users jika ada
-        await db.query('UPDATE users SET role = $2, updated_at = NOW() WHERE id = $1 OR discord_user_id = $1', [targetUserId, upperRole]);
+        // 2. Update juga kolom role di tabel users jika ada
+        await db.query(
+            `UPDATE users SET role = $2, updated_at = NOW() 
+             WHERE id = $1 OR discord_user_id = $1 
+                OR id IN (SELECT user_id FROM user_channels WHERE external_user_id = $1 OR phone_number = $1 OR phone_number = $3)`,
+            [cleanTarget, upperRole, cleanPhone]
+        );
 
         // Invalidate cache
-        roleCache.delete(targetUserId);
+        roleCache.delete(cleanTarget);
+        if (cleanPhone) roleCache.delete(cleanPhone);
 
         // Catat Audit Log
         await logAudit({
             userId: assignedByUserId,
             action: 'ROLE_UPDATE',
             resourceType: 'USER_ROLE',
-            resourceId: targetUserId,
+            resourceId: cleanTarget,
             riskLevel: upperRole === 'OWNER' || upperRole === 'BLOCKED' ? 'HIGH' : 'MEDIUM',
             status: 'SUCCESS',
-            metadata: { targetUserId, newRole: upperRole, notes },
+            metadata: { targetUserId: cleanTarget, newRole: upperRole, notes },
         });
 
         return {
             success: true,
-            message: `Role untuk user <@${targetUserId}> berhasil diubah menjadi **${upperRole}**.`,
+            message: `✅ Role untuk user **${cleanTarget}** berhasil diubah menjadi **${upperRole}**.`,
         };
     } catch (err) {
         console.error('⚠️ Gagal menetapkan user role:', err.message);
         return { success: false, message: `Gagal memperbarui role: ${err.message}` };
+    }
+}
+
+/**
+ * Mendaftarkan pengguna baru secara resmi ke database oleh Owner
+ */
+async function registerNewUser({
+    identifier,
+    displayName,
+    role = 'USER',
+    assignedBy = 'SYSTEM',
+    notes = '',
+}) {
+    if (assignedBy !== 'SYSTEM') {
+        const isOwner = await isAuthorizedOwner(assignedBy);
+        if (!isOwner) {
+            return {
+                success: false,
+                message: '⛔ Hanya **OWNER** yang memiliki hak untuk mendaftarkan pengguna baru!',
+            };
+        }
+    }
+
+    const upperRole = String(role || 'USER').toUpperCase();
+    if (!ROLES[upperRole]) {
+        return { success: false, message: `Role "${role}" tidak valid. Pilihan: OWNER, ADMIN, USER.` };
+    }
+
+    const cleanId = String(identifier).trim();
+    const isPhone = /^\+?[0-9]{8,16}$/.test(cleanId);
+    const cleanPhone = isPhone ? cleanId.replace(/\D/g, '') : null;
+    const internalUserId = isPhone ? `wa_${cleanPhone}` : cleanId;
+    const finalName = displayName ? displayName.trim() : (isPhone ? `WA User ${cleanPhone}` : `User ${cleanId}`);
+
+    try {
+        // 1. Masukkan ke tabel users (internalUserId digunakan sebagai discord_user_id untuk WhatsApp guna memenuhi NOT NULL constraint)
+        await db.query(
+            `INSERT INTO users (id, discord_user_id, display_name, role, status, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, 'ACTIVE', NOW(), NOW())
+             ON CONFLICT (id) DO UPDATE SET
+                 display_name = COALESCE(EXCLUDED.display_name, users.display_name),
+                 role = EXCLUDED.role,
+                 status = 'ACTIVE',
+                 updated_at = NOW();`,
+            [internalUserId, internalUserId, finalName, upperRole]
+        );
+
+        // 2. Masukkan ke tabel user_channels
+        if (isPhone) {
+            await db.query(
+                `INSERT INTO user_channels (user_id, channel_type, external_user_id, phone_number, display_name, status, is_primary, created_at, updated_at)
+                 VALUES ($1, 'WHATSAPP', $2, $2, $3, 'ACTIVE', true, NOW(), NOW())
+                 ON CONFLICT (channel_type, external_user_id) DO UPDATE SET
+                     user_id = EXCLUDED.user_id,
+                     status = 'ACTIVE',
+                     display_name = EXCLUDED.display_name,
+                     phone_number = EXCLUDED.phone_number,
+                     updated_at = NOW();`,
+                [internalUserId, cleanPhone, finalName]
+            );
+        } else {
+            await db.query(
+                `INSERT INTO user_channels (user_id, channel_type, external_user_id, display_name, status, is_primary, created_at, updated_at)
+                 VALUES ($1, 'DISCORD', $2, $3, 'ACTIVE', true, NOW(), NOW())
+                 ON CONFLICT (channel_type, external_user_id) DO UPDATE SET
+                     user_id = EXCLUDED.user_id,
+                     status = 'ACTIVE',
+                     display_name = EXCLUDED.display_name,
+                     updated_at = NOW();`,
+                [internalUserId, cleanId, finalName]
+            );
+        }
+
+        // 3. Masukkan ke tabel user_roles
+        await db.query(
+            `INSERT INTO user_roles (discord_user_id, role, assigned_by, notes, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, NOW(), NOW())
+             ON CONFLICT (discord_user_id) DO UPDATE SET
+                 role = EXCLUDED.role,
+                 assigned_by = EXCLUDED.assigned_by,
+                 notes = EXCLUDED.notes,
+                 updated_at = NOW();`,
+            [internalUserId, upperRole, assignedBy, notes || 'Registered by Owner']
+        );
+
+        roleCache.delete(cleanId);
+        if (cleanPhone) roleCache.delete(cleanPhone);
+
+        return {
+            success: true,
+            message: `🎉 Berhasil mendaftarkan pengguna baru:\n• Nama: **${finalName}**\n• ID/Nomor: \`${cleanId}\`\n• Platform: **${isPhone ? 'WHATSAPP' : 'DISCORD'}**\n• Role: **${upperRole}**`,
+        };
+    } catch (err) {
+        console.error('⚠️ Gagal register new user:', err.message);
+        return { success: false, message: `Gagal mendaftarkan user: ${err.message}` };
+    }
+}
+
+/**
+ * Mengambil daftar seluruh pengguna terdaftar beserta rolenya
+ */
+async function listAllUsersWithRoles() {
+    try {
+        const res = await db.query(`
+            SELECT 
+                u.id,
+                u.display_name,
+                u.callsign,
+                u.role,
+                u.status,
+                uc.channel_type,
+                uc.external_user_id,
+                uc.phone_number,
+                uc.last_seen_at
+            FROM users u
+            LEFT JOIN user_channels uc ON uc.user_id = u.id
+            WHERE u.status = 'ACTIVE' AND uc.status = 'ACTIVE'
+              AND uc.external_user_id NOT IN ('12345', 'test_user_kicen')
+            ORDER BY 
+                CASE u.role WHEN 'OWNER' THEN 1 WHEN 'ADMIN' THEN 2 WHEN 'USER' THEN 3 ELSE 4 END,
+                u.created_at ASC;
+        `);
+        return res.rows;
+    } catch (err) {
+        console.error('⚠️ Gagal mengambil daftar user:', err.message);
+        return [];
+    }
+}
+
+/**
+ * Menghapus/mengeluarkan pengguna dari database (Khusus OWNER)
+ * Mencabut seluruh akses peran dan menghapus data pengguna agar tidak bisa mengakses bot lagi
+ * @param {object} params
+ * @param {string} params.identifier - Nomor WhatsApp, Discord ID, atau mention
+ * @param {string} params.requestedBy - ID pemohon (Wajib OWNER)
+ * @param {string} params.reason - Alasan penghapusan (opsional)
+ * @returns {Promise<{ success: boolean, message: string, removedUser?: object }>}
+ */
+async function removeUser({ identifier, requestedBy, reason = 'Removed by Owner' }) {
+    if (!identifier) {
+        return { success: false, message: 'ID atau nomor kontak pengguna yang akan dihapus wajib diisi.' };
+    }
+
+    // 1. Validasi Pemohon: Hanya OWNER yang berhak menghapus pengguna
+    const isOwner = await isAuthorizedOwner(requestedBy);
+    if (!isOwner) {
+        return { success: false, message: '⛔ Akses ditolak! Hanya **OWNER** yang memiliki wewenang untuk mengeluarkan/menghapus pengguna dari sistem.' };
+    }
+
+    // Bersihkan ID / mention
+    const cleanId = String(identifier).trim().replace(/[<@!>]/g, '');
+    const cleanDigits = cleanId.replace(/\D/g, '');
+    const isPhone = /^\+?[0-9]{8,16}$/.test(cleanId) || (cleanDigits.length >= 8 && cleanDigits.length <= 16 && !cleanId.startsWith('wa_'));
+    const phoneNum = isPhone ? cleanDigits : null;
+    const internalWaId = phoneNum ? `wa_${phoneNum}` : (cleanId.startsWith('wa_') ? cleanId : null);
+
+    // 2. Proteksi Mutlak Akun Owner (Jangan sampai owner terhapus sendiri)
+    const isTargetOwner = await isAuthorizedOwner(cleanId) || (phoneNum && await isAuthorizedOwner(phoneNum)) || (internalWaId && await isAuthorizedOwner(internalWaId));
+    if (isTargetOwner) {
+        return { success: false, message: '⛔ Ditolak! Akun **OWNER** utama dilindungi sistem dan tidak dapat dihapus.' };
+    }
+
+    try {
+        // 3. Cari user terlebih dahulu untuk konfirmasi data
+        const findRes = await db.query(
+            `SELECT u.id, u.display_name, u.role, uc.channel_type, uc.external_user_id, uc.phone_number
+             FROM users u
+             LEFT JOIN user_channels uc ON uc.user_id = u.id
+             WHERE u.id = $1 
+                OR u.discord_user_id = $1 
+                OR uc.external_user_id = $1 
+                OR uc.phone_number = $1
+                OR ( $2::varchar IS NOT NULL AND (uc.phone_number = $2 OR uc.external_user_id = $2 OR u.id = $3) )
+             LIMIT 1;`,
+            [cleanId, phoneNum, internalWaId]
+        );
+
+        if (findRes.rowCount === 0) {
+            return { success: false, message: `Pengguna dengan ID/Nomor \`${cleanId}\` tidak ditemukan dalam database.` };
+        }
+
+        const targetUser = findRes.rows[0];
+        const targetUserId = targetUser.id;
+        const targetName = targetUser.display_name || 'Pengguna';
+        const targetRole = targetUser.role || 'USER';
+        const targetContact = targetUser.phone_number || targetUser.external_user_id || cleanId;
+        const channelType = targetUser.channel_type || (phoneNum ? 'WHATSAPP' : 'DISCORD');
+
+        // 4. Hapus dari tabel pendukung
+        await db.query(
+            `DELETE FROM user_roles 
+             WHERE discord_user_id = $1 OR discord_user_id = $2 OR discord_user_id = $3;`, 
+            [targetUserId, cleanId, phoneNum || targetUserId]
+        );
+
+        await Promise.allSettled([
+            db.query(`DELETE FROM tasks WHERE user_id = $1 OR user_id = $2;`, [targetUserId, cleanId]),
+            db.query(`DELETE FROM reminders WHERE user_id = $1 OR user_id = $2;`, [targetUserId, cleanId]),
+            db.query(`DELETE FROM finances WHERE user_id = $1 OR user_id = $2;`, [targetUserId, cleanId]),
+        ]);
+
+        // 5. Hapus dari tabel users (otomatis CASCADE ke user_channels, memories, conversations, dll.)
+        await db.query(`DELETE FROM users WHERE id = $1;`, [targetUserId]);
+
+        // 6. Invalidate Cache
+        roleCache.delete(targetUserId);
+        roleCache.delete(cleanId);
+        if (phoneNum) roleCache.delete(phoneNum);
+        if (internalWaId) roleCache.delete(internalWaId);
+
+        // 7. Catat ke Audit Log
+        await logAudit({
+            userId: requestedBy,
+            action: 'USER_KICKED_DELETED',
+            resourceType: 'users',
+            resourceId: targetUserId,
+            riskLevel: 'HIGH',
+            status: 'SUCCESS',
+            metadata: {
+                removedUser: targetName,
+                removedContact: targetContact,
+                role: targetRole,
+                reason,
+            },
+        });
+
+        console.log(`🗑️ [User Kicked] Pengguna ${targetName} (${targetContact}) role ${targetRole} berhasil dihapus dari sistem oleh Owner ${requestedBy}`);
+
+        return {
+            success: true,
+            message: `🗑️ **Pengguna Berhasil Dikeluarkan & Dihapus!**\n• Nama: **${targetName}**\n• Kontak/ID: \`${targetContact}\`\n• Platform: **${channelType}**\n• Role Sebelumnya: **${targetRole}**\n• Status: *Akses bot telah dicabut permanen (kembali menjadi GUEST).*`,
+            removedUser: targetUser,
+        };
+    } catch (err) {
+        console.error('⚠️ Gagal menghapus user:', err.message);
+        return { success: false, message: `Gagal menghapus pengguna: ${err.message}` };
     }
 }
 
@@ -464,8 +702,12 @@ module.exports = {
     sanitizeSensitiveData,
     logAudit,
     getUserRole,
+    isAuthorizedOwner,
     hasMinimumRole,
     setUserRole,
+    registerNewUser,
+    removeUser,
+    listAllUsersWithRoles,
     checkToolPermission,
     listPrivilegedUsers,
     getRecentAuditLogs,
