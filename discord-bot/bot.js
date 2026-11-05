@@ -37,6 +37,7 @@ const security = require('./securityService');
 const scheduleService = require('./scheduleService');
 const taskChainService = require('./taskChainService');
 const { runAutoMigrations } = require('./migrationRunner');
+const { generateDirectGeminiReply } = require('./aiDirectService');
 const { getCompleteHealthStatus } = require('./healthService');
 const {
     createRequestId,
@@ -1676,15 +1677,41 @@ async function processBotRequest(message, content, isVoiceInput, existingTypingI
             }
         }
     } catch (error) {
-        if (agentRunId) {
-            finishAgentRun(agentRunId, 'FAILED', error.message).catch(() => {});
-        }
-        if (error.name === 'TimeoutError') {
-            console.error(`⏱️ Request ke n8n timeout setelah ${N8N_TIMEOUT_MS}ms`);
-            await message.reply(`Aduh ${greetingInfo.preferredName}, responnya lagi lambat banget nih dari otak AI. Boleh dicoba ketik ulang?`).catch(() => {});
-        } else {
-            console.error('❌ Gagal memproses pesan:', error.message);
-            await message.reply(`Waduh ${greetingInfo.preferredName}, koneksi ke otak AI gue lagi ada kendala nih. Coba lagi bentar ya!`).catch(() => {});
+        console.warn(`🤖 [Discord] n8n offline (${error.message}), memproses langsung via Direct Gemini AI...`);
+        try {
+            const fallbackReply = await generateDirectGeminiReply({
+                userMessage: finalContent,
+                userName: greetingInfo ? greetingInfo.preferredName : message.author.username,
+                callsign: greetingInfo ? greetingInfo.callsign : null,
+                userRole: userRole,
+                memories: userMemories,
+            });
+
+            await message.reply(fallbackReply);
+
+            recordConversation(
+                message.author.id,
+                message.channel.id,
+                isVoiceInput ? 'VOICE_NOTE' : 'TEXT',
+                'text',
+                finalContent,
+                fallbackReply,
+                { channelName: message.channel.name || 'DM', fallback: 'DIRECT_GEMINI' }
+            ).catch(() => {});
+
+            if (agentRunId) {
+                finishAgentRun(agentRunId, 'COMPLETED', null, { replyMode: 'text', fallback: true }).catch(() => {});
+            }
+        } catch (geminiErr) {
+            console.error('❌ Direct Gemini AI juga gagal:', geminiErr.message);
+            if (agentRunId) {
+                finishAgentRun(agentRunId, 'FAILED', geminiErr.message).catch(() => {});
+            }
+            if (error.name === 'TimeoutError') {
+                await message.reply(`Aduh ${greetingInfo.preferredName}, responnya lagi lambat banget nih dari otak AI. Boleh dicoba ketik ulang?`).catch(() => {});
+            } else {
+                await message.reply(`Waduh ${greetingInfo.preferredName}, koneksi ke otak AI gue lagi ada kendala nih. Coba lagi bentar ya!`).catch(() => {});
+            }
         }
     } finally {
         clearInterval(typingInterval);

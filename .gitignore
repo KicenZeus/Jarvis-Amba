@@ -10,6 +10,7 @@
 **/*.env
 !*.env.example
 !**/.env.example
+PANDUAN_DEPLOY_RAILWAY_TUMBAL.md
 
 # 2. Private Keys, Certificates & Tokens
 *.pem
@@ -34,6 +35,8 @@ yarn-error.log*
 pnpm-debug.log*
 
 # 5. Database Dumps & Real User Data (CRITICAL)
+dump_*.sql
+dump_jarvis.sql
 backups/*.sql
 backups/*.sql.bak
 backups/*.dump

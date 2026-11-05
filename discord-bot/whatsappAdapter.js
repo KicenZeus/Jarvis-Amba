@@ -5,6 +5,7 @@ const scheduleService = require('./scheduleService');
 const taskChainService = require('./taskChainService');
 const { getRelevantMemories } = require('./memoryService');
 const { transcribeAudio, analyzeImage, generateTTS, cleanupAudio } = require('./voiceService');
+const { generateDirectGeminiReply } = require('./aiDirectService');
 
 /**
  * ==============================================================================
@@ -925,20 +926,53 @@ ATURAN WAJIB MODE SUARA:
                             await channelService.updateMessageStatus('WHATSAPP', messageId, 'COMPLETED', replyText);
                         }
                     } else {
-                        console.error(`⚠️ [WhatsApp] n8n merespon status ${n8nRes.status}`);
-                        await sendWhatsAppTextMessage(
-                            fromNumber,
-                            'Maaf, Amba sedang mengalami sedikit kendala sistem. Coba lagi sebentar ya!'
-                        );
-                        await channelService.updateMessageStatus('WHATSAPP', messageId, 'FAILED');
+                        console.warn(`⚠️ [WhatsApp] n8n merespon status ${n8nRes.status}, mengalihkan ke Direct Gemini AI...`);
+                        throw new Error(`n8n HTTP ${n8nRes.status}`);
                     }
                 } catch (coreErr) {
-                    console.error('❌ [WhatsApp] Gagal meneruskan ke n8n Core:', coreErr.message);
-                    await sendWhatsAppTextMessage(
-                        fromNumber,
-                        'Maaf, koneksi Amba ke Core sedang terganggu. Silakan coba lagi.'
-                    );
-                    await channelService.updateMessageStatus('WHATSAPP', messageId, 'ERROR');
+                    console.warn(`🤖 [WhatsApp] n8n offline/unreachable (${coreErr.message}), memproses langsung via Direct Gemini AI...`);
+                    try {
+                        const fallbackReply = await generateDirectGeminiReply({
+                            userMessage: textContent,
+                            userName: userDisplayName,
+                            callsign: callsign,
+                            userRole: isOwner ? 'OWNER' : (resolved.user?.role || 'USER'),
+                            memories: userMemories,
+                            wantsVoice: wantsVoice,
+                        });
+
+                        if (wantsVoice) {
+                            let voiceSent = false;
+                            try {
+                                console.log(`🎙️ [WhatsApp] Memproses Voice Note TTS via Direct Gemini untuk ${fromNumber}...`);
+                                const ttsFilePath = await generateTTS(fallbackReply, 'id-ID-ArdiNeural');
+                                if (ttsFilePath && fs.existsSync(ttsFilePath)) {
+                                    const audioBuf = fs.readFileSync(ttsFilePath);
+                                    const sendRes = await sendWhatsAppAudioMessage(fromNumber, audioBuf);
+                                    cleanupAudio(ttsFilePath);
+                                    if (sendRes.success) {
+                                        voiceSent = true;
+                                        console.log(`🎙️ [WhatsApp] Voice Note berhasil dikirim ke ${fromNumber}`);
+                                    }
+                                }
+                            } catch (ttsErr) {
+                                console.warn('⚠️ [WhatsApp] Gagal generate audio TTS fallback:', ttsErr.message);
+                            }
+                            if (!voiceSent) {
+                                await sendWhatsAppTextMessage(fromNumber, fallbackReply);
+                            }
+                        } else {
+                            await sendWhatsAppTextMessage(fromNumber, fallbackReply);
+                        }
+                        await channelService.updateMessageStatus('WHATSAPP', messageId, 'COMPLETED', fallbackReply);
+                    } catch (geminiErr) {
+                        console.error('❌ [WhatsApp] Direct Gemini AI juga gagal:', geminiErr.message);
+                        await sendWhatsAppTextMessage(
+                            fromNumber,
+                            'Maaf, Amba sedang mengalami sedikit kendala sistem. Silakan coba lagi.'
+                        );
+                        await channelService.updateMessageStatus('WHATSAPP', messageId, 'ERROR');
+                    }
                 }
             }
         }
