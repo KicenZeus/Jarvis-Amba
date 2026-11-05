@@ -36,6 +36,7 @@ const {
 const security = require('./securityService');
 const scheduleService = require('./scheduleService');
 const taskChainService = require('./taskChainService');
+const { runAutoMigrations } = require('./migrationRunner');
 const { getCompleteHealthStatus } = require('./healthService');
 const {
     createRequestId,
@@ -109,7 +110,7 @@ const unregisteredDiscordGatekeepMap = new Map();
 const N8N_WEBHOOK_URL =
     process.env.N8N_WEBHOOK_URL || 'http://localhost:5678/webhook/jarvis-discord';
 const N8N_TIMEOUT_MS = parseInt(process.env.N8N_TIMEOUT_MS, 10) || 60000;
-const NOTIFY_PORT = parseInt(process.env.NOTIFY_PORT, 10) || 5001;
+const NOTIFY_PORT = parseInt(process.env.PORT || process.env.NOTIFY_PORT, 10) || 5001;
 const ALLOWED_USER_IDS = process.env.ALLOWED_USER_IDS
     ? process.env.ALLOWED_USER_IDS.split(',').map((id) => id.trim()).filter(Boolean)
     : [];
@@ -125,7 +126,7 @@ const client = new Client({
     partials: [Partials.Channel, Partials.Message],
 });
 
-client.once(Events.ClientReady, (readyClient) => {
+client.once(Events.ClientReady, async (readyClient) => {
     console.log(`✅ Jarvis online sebagai ${readyClient.user.tag}`);
     console.log(`🔗 Target n8n Webhook: ${N8N_WEBHOOK_URL}`);
     if (ALLOWED_USER_IDS.length > 0) {
@@ -135,6 +136,14 @@ client.once(Events.ClientReady, (readyClient) => {
     }
     // Set global client untuk pengiriman broadcast & proaktif
     setDiscordClient(readyClient);
+
+    // Jalankan migrasi database otomatis jika ada tabel yang belum terpasang (Railway / Cloud deployment ready)
+    try {
+        await runAutoMigrations();
+    } catch (migErr) {
+        console.error('⚠️ [Migration] Auto-migration gagal:', migErr.message);
+    }
+
     // Aktifkan scheduler proaktif (Daily Briefing, Daily Recap, Recurring & Snooze)
     startProactiveScheduler(readyClient);
 });
@@ -1830,8 +1839,8 @@ async function handleVoiceChannelAudio(userId, wavBuffer, guildId, textChannel =
 
 // Listener HTTP internal untuk notifikasi proaktif & Health Check (Phase 8)
 const notifyServer = http.createServer(async (req, res) => {
-    // 1. Endpoint Health Check (Phase 8)
-    if (req.method === 'GET' && req.url === '/health') {
+    // 1. Endpoint Health Check (Phase 8) & Uptime Pinger Keepalive
+    if (req.method === 'GET' && (req.url === '/health' || req.url === '/')) {
         try {
             const wsPing = client.ws.ping;
             const healthData = await getCompleteHealthStatus(wsPing);

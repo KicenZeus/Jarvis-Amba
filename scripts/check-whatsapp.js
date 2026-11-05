@@ -5,7 +5,13 @@
  * ==============================================================================
  */
 
+const path = require('path');
 const { execSync } = require('child_process');
+
+// Load environment variables dari discord-bot/.env jika ada
+try {
+    require('dotenv').config({ path: path.join(__dirname, '../discord-bot/.env') });
+} catch (_) {}
 
 async function main() {
     console.log('\n===================================================================');
@@ -14,8 +20,20 @@ async function main() {
 
     let tunnelUrl = null;
     try {
-        const logs = execSync('docker logs jarvis-tunnel 2>&1', { encoding: 'utf8' });
-        const matches = [...logs.matchAll(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/g)];
+        // Ambil 100 baris terakhir dari instance tunnel yang sedang aktif saat ini
+        let logs = '';
+        try {
+            logs = execSync('docker compose logs --tail 100 tunnel', {
+                encoding: 'utf8',
+                maxBuffer: 10 * 1024 * 1024,
+            });
+        } catch (_) {
+            logs = execSync('docker logs --tail 100 jarvis-tunnel 2>&1', {
+                encoding: 'utf8',
+                maxBuffer: 10 * 1024 * 1024,
+            });
+        }
+        let matches = [...logs.matchAll(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/g)];
         if (matches.length > 0) {
             tunnelUrl = matches[matches.length - 1][0];
         }
