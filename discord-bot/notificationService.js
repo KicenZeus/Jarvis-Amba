@@ -205,19 +205,24 @@ async function resolveNotificationDestinations(userId, eventType, context = {}) 
         }
 
         // Resolusi Target WHATSAPP
-        if (channelType === 'WHATSAPP' || channelType === 'BOTH') {
+        const isWhatsAppOrigin = context.channelId && String(context.channelId).startsWith('wa_');
+        if (channelType === 'WHATSAPP' || channelType === 'BOTH' || isWhatsAppOrigin) {
             let waPhone = waChannel?.phone_number || waChannel?.external_user_id;
 
             // Jika context membawa channelId WhatsApp (wa_628xxx)
-            if (!waPhone && context.channelId && String(context.channelId).startsWith('wa_')) {
+            if (!waPhone && isWhatsAppOrigin) {
                 waPhone = String(context.channelId).replace(/^wa_/, '');
             }
             // Jika userId berawalan wa_
             if (!waPhone && String(userId).startsWith('wa_')) {
                 waPhone = String(userId).replace(/^wa_/, '');
             }
+            // Fallback langsung dari context.channelId jika masih kosong
+            if (!waPhone && isWhatsAppOrigin) {
+                waPhone = String(context.channelId).replace(/^wa_/, '');
+            }
 
-            if (waPhone) {
+            if (waPhone && !targets.some((t) => t.channel === 'WHATSAPP' && t.destination === waPhone)) {
                 targets.push({
                     channel: 'WHATSAPP',
                     destination: waPhone,

@@ -427,20 +427,24 @@ async function checkAndSendProactiveMessages(client) {
             }
         }
 
-        // 3. CHECK SNOOZED REMINDERS YANG JATUH TEMPO
-        const snoozed = await db.query(
+        // 3. CHECK DUE REMINDERS (Regular & Snoozed yang jatuh tempo)
+        const dueReminders = await db.query(
             `UPDATE reminders 
-             SET status = 'sent', sent_at = NOW(), snooze_until = NULL
+             SET status = 'sent', sent_at = NOW(), snooze_until = NULL, last_triggered_at = NOW()
              WHERE id IN (
                  SELECT id FROM reminders 
-                 WHERE status = 'pending' AND snooze_until IS NOT NULL AND snooze_until <= NOW()
+                 WHERE status = 'pending' AND (
+                     (snooze_until IS NOT NULL AND snooze_until <= NOW())
+                     OR (snooze_until IS NULL AND remind_at <= NOW())
+                 )
                  FOR UPDATE SKIP LOCKED
              )
-             RETURNING id, user_id, channel_id, title;`
+             RETURNING id, user_id, channel_id, title, priority, repeat_rule;`
         );
 
-        for (const r of snoozed.rows) {
-            const text = `⏰ **[Snooze Berakhir]:** ${r.title}`;
+        for (const r of dueReminders.rows) {
+            const badge = formatPriorityBadge(r.priority);
+            const text = `⏰ *[PENGINGAT]* ${badge}\n${r.title}`;
             const smartRes = await sendSmartNotification({
                 userId: r.user_id,
                 eventType: 'REMINDER',
@@ -448,8 +452,17 @@ async function checkAndSendProactiveMessages(client) {
                 context: { channelId: r.channel_id, reminderId: r.id },
                 discordClient: client,
             });
+
             if (smartRes.success) {
-                console.log(`⏰ Pengingat snooze #${r.id} berhasil terpicu kembali.`);
+                console.log(`⏰ Pengingat #${r.id} berhasil terpicu & dikirim ke user ${r.user_id}`);
+            } else {
+                console.log(`ℹ️ [Notification] Pengingat #${r.id} tidak terkirim: ${smartRes.reason}`);
+            }
+
+            if (r.repeat_rule) {
+                handleRecurringReminder(r.id).catch((err) =>
+                    console.error('⚠️ Gagal menjadwalkan recurring reminder:', err.message)
+                );
             }
         }
 
@@ -475,10 +488,10 @@ function startProactiveScheduler(client) {
         checkAndSendProactiveMessages(client).catch(() => {});
     }, 5000);
 
-    // Lalu jalankan interval setiap 60 detik
+    // Lalu jalankan interval setiap 30 detik untuk akurasi pengingat
     const interval = setInterval(() => {
         checkAndSendProactiveMessages(client).catch(() => {});
-    }, 60000);
+    }, 30000);
 
     return interval;
 }

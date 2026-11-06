@@ -1681,6 +1681,8 @@ async function processBotRequest(message, content, isVoiceInput, existingTypingI
         try {
             const fallbackReply = await generateDirectGeminiReply({
                 userMessage: finalContent,
+                userId: message.author.id,
+                channelId: message.channel.id,
                 userName: greetingInfo ? greetingInfo.preferredName : message.author.username,
                 callsign: greetingInfo ? greetingInfo.callsign : null,
                 userRole: userRole,

@@ -934,6 +934,8 @@ ATURAN WAJIB MODE SUARA:
                     try {
                         const fallbackReply = await generateDirectGeminiReply({
                             userMessage: textContent,
+                            userId: internalUserId || fromNumber,
+                            channelId: `wa_${cleanPhone}`,
                             userName: userDisplayName,
                             callsign: callsign,
                             userRole: isOwner ? 'OWNER' : (resolved.user?.role || 'USER'),
