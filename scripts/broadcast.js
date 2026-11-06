@@ -9,26 +9,66 @@ const readline = require('readline');
  * ==============================================================================
  */
 
-const BOT_API_URL = process.env.BOT_API_URL || 'http://localhost:5001/api/broadcast';
-const BOT_USERS_URL = process.env.BOT_USERS_URL || 'http://localhost:5001/api/users';
+const DEFAULT_REMOTE_URL = 'https://jarvis-amba-production.up.railway.app';
+let ACTIVE_BASE_URL = process.env.BOT_URL || (process.env.BOT_API_URL ? process.env.BOT_API_URL.replace(/\/api\/.*$/, '') : DEFAULT_REMOTE_URL);
 const DEFAULT_OWNER_ID = '713137141072396370';
 
+function getBotApiUrl() {
+    return process.env.BOT_API_URL || `${ACTIVE_BASE_URL}/api/broadcast`;
+}
+
+function getBotUsersUrl() {
+    return process.env.BOT_USERS_URL || `${ACTIVE_BASE_URL}/api/users`;
+}
+
+async function resolveActiveServer() {
+    // Kandidat URL yang akan dicoba secara otomatis (prioritaskan Railway cloud / config user)
+    const candidates = [
+        process.env.BOT_URL,
+        ACTIVE_BASE_URL,
+        DEFAULT_REMOTE_URL,
+        'http://localhost:5001',
+        'http://localhost:8080',
+    ].filter(Boolean);
+
+    const uniqueCandidates = [...new Set(candidates)];
+
+    for (const baseUrl of uniqueCandidates) {
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 4000);
+            const res = await fetch(`${baseUrl}/api/users`, {
+                method: 'GET',
+                headers: { 'Content-Type': 'application/json' },
+                signal: controller.signal,
+            });
+            clearTimeout(timeoutId);
+
+            if (res.ok) {
+                const data = await res.json().catch(() => null);
+                if (Array.isArray(data?.users)) {
+                    ACTIVE_BASE_URL = baseUrl;
+                    return data.users;
+                }
+            }
+        } catch (_) {}
+    }
+    return null;
+}
+
 async function fetchRegisteredUsers() {
-    try {
-        const res = await fetch(BOT_USERS_URL, {
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' },
-        });
-        if (!res.ok) return [];
-        const data = await res.json().catch(() => null);
-        return Array.isArray(data?.users) ? data.users : [];
-    } catch {
+    const users = await resolveActiveServer();
+    if (!users) {
+        console.warn(`\n⚠️ Peringatan: Tidak dapat terhubung ke server Jarvis Bot API.`);
+        console.warn(`💡 Pastikan server Jarvis sedang online di ${ACTIVE_BASE_URL} atau jalankan container lokal.`);
         return [];
     }
+    return users;
 }
 
 async function sendBroadcast({ message, target = 'ALL', schedule = null, role = null, to = null, userId = DEFAULT_OWNER_ID }) {
-    console.log(`\n⏳ Menghubungi Jarvis Bot API (${BOT_API_URL})...`);
+    const apiUrl = getBotApiUrl();
+    console.log(`\n⏳ Menghubungi Jarvis Bot API (${apiUrl})...`);
     try {
         const payload = {
             message: message ? message.trim() : '',
@@ -39,7 +79,7 @@ async function sendBroadcast({ message, target = 'ALL', schedule = null, role = 
             userId,
         };
 
-        const res = await fetch(BOT_API_URL, {
+        const res = await fetch(apiUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -92,16 +132,17 @@ async function sendBroadcast({ message, target = 'ALL', schedule = null, role = 
             console.error(`\n❌ Broadcast gagal: ${data.error || 'Operasi ditolak'}`);
         }
     } catch (err) {
-        console.error(`\n❌ Gagal terhubung ke Jarvis Bot (${BOT_API_URL}): ${err.message}`);
-        console.error(`💡 Tips: Pastikan Docker container 'jarvis-bot' sedang berjalan di port 5001.`);
+        console.error(`\n❌ Gagal terhubung ke Jarvis Bot (${apiUrl}): ${err.message}`);
+        console.error(`💡 Tips: Pastikan server Jarvis sedang online di ${ACTIVE_BASE_URL}.`);
         process.exit(1);
     }
 }
 
 async function listSchedules() {
-    console.log(`\n⏳ Mengambil daftar jadwal broadcast aktif...`);
+    const apiUrl = getBotApiUrl();
+    console.log(`\n⏳ Mengambil daftar jadwal broadcast aktif dari ${apiUrl}...`);
     try {
-        const res = await fetch(BOT_API_URL, {
+        const res = await fetch(apiUrl, {
             method: 'GET',
             headers: { 'Content-Type': 'application/json' },
         });
@@ -133,7 +174,7 @@ async function listSchedules() {
         });
         console.log(`\n======================================================`);
     } catch (err) {
-        console.error(`\n❌ Gagal terhubung ke Jarvis Bot: ${err.message}`);
+        console.error(`\n❌ Gagal terhubung ke Jarvis Bot (${apiUrl}): ${err.message}`);
     }
 }
 
@@ -142,9 +183,10 @@ async function cancelSchedule(broadcastId) {
         console.error('\n❌ ID broadcast wajib diisi.');
         return;
     }
-    console.log(`\n⏳ Membatalkan jadwal broadcast #${broadcastId}...`);
+    const apiUrl = getBotApiUrl();
+    console.log(`\n⏳ Membatalkan jadwal broadcast #${broadcastId} via ${apiUrl}...`);
     try {
-        const res = await fetch(BOT_API_URL, {
+        const res = await fetch(apiUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -162,7 +204,7 @@ async function cancelSchedule(broadcastId) {
 
         console.log(`\n✅ ${data.message || `Jadwal broadcast #${broadcastId} berhasil dibatalkan!`}`);
     } catch (err) {
-        console.error(`\n❌ Gagal terhubung ke Jarvis Bot: ${err.message}`);
+        console.error(`\n❌ Gagal terhubung ke Jarvis Bot (${apiUrl}): ${err.message}`);
     }
 }
 
@@ -171,9 +213,10 @@ async function kickUser(identifier) {
         console.error('\n❌ ID atau nomor kontak pengguna wajib diisi.');
         return;
     }
-    console.log(`\n⏳ Mengirim permintaan pencabutan akses untuk [${identifier}]...`);
+    const apiUrl = getBotApiUrl();
+    console.log(`\n⏳ Mengirim permintaan pencabutan akses untuk [${identifier}] via ${apiUrl}...`);
     try {
-        const res = await fetch(BOT_API_URL, {
+        const res = await fetch(apiUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -191,7 +234,7 @@ async function kickUser(identifier) {
 
         console.log(`\n${data.message}`);
     } catch (err) {
-        console.error(`\n❌ Gagal terhubung ke Jarvis Bot: ${err.message}`);
+        console.error(`\n❌ Gagal terhubung ke Jarvis Bot (${apiUrl}): ${err.message}`);
     }
 }
 
@@ -217,6 +260,7 @@ async function promptInteractive() {
         console.log(`======================================================`);
         console.log(`Sistem siaran serentak & terjadwal WhatsApp & Discord`);
         console.log(`Khusus Hak Akses Owner (Jarvis Core Security)`);
+        console.log(`Target Server : ${ACTIVE_BASE_URL}`);
         console.log(`======================================================`);
         console.log(`Pilih Menu:`);
         console.log(`  1. 📢 Kirim Broadcast Instan (Kirim Sekarang)`);
@@ -316,12 +360,12 @@ async function promptInteractive() {
         console.log(`\n⏳ Mengambil data pengguna terdaftar...`);
         const allUsers = await fetchRegisteredUsers();
 
-        // Saring user berdasarkan saluran
+        // Saring user berdasarkan saluran (case-insensitive)
         let channelUsers = allUsers;
         if (target === 'WHATSAPP') {
-            channelUsers = allUsers.filter((u) => u.channel_type === 'WHATSAPP');
+            channelUsers = allUsers.filter((u) => (u.channel_type || '').toUpperCase() === 'WHATSAPP');
         } else if (target === 'DISCORD') {
-            channelUsers = allUsers.filter((u) => u.channel_type === 'DISCORD');
+            channelUsers = allUsers.filter((u) => (u.channel_type || '').toUpperCase() === 'DISCORD');
         }
 
         console.log(`\n👥 Pilih Mode Target Penerima:`);

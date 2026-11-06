@@ -2138,4 +2138,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 process.on('SIGTERM', () => handleGracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => handleGracefulShutdown('SIGINT'));
 
-client.login(process.env.DISCORD_TOKEN);
+if (process.env.DISCORD_TOKEN) {
+    client.login(process.env.DISCORD_TOKEN).catch((err) => {
+        console.error('❌ Gagal login Discord:', err.message);
+        // Tetap jalankan scheduler proaktif agar pengingat WhatsApp & webhook tetap aktif 24/7
+        startProactiveScheduler(client);
+    });
+} else {
+    console.warn('⚠️ DISCORD_TOKEN tidak ditemukan di environment. Menjalankan scheduler untuk mode WhatsApp/API.');
+    startProactiveScheduler(client);
+}

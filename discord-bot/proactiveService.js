@@ -355,15 +355,15 @@ async function resolveProactiveChannel(client, user) {
 /**
  * Memeriksa dan mengirimkan Daily Briefing & Daily Recap secara otomatis
  */
-async function checkAndSendProactiveMessages(client) {
-    if (!client || !client.isReady()) return;
-
+async function checkAndSendProactiveMessages(client = null) {
     try {
-        // Ambil waktu saat ini di WIB
-        const nowWIB = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jakarta' }));
-        const currentHours = String(nowWIB.getHours()).padStart(2, '0');
-        const currentMinutes = String(nowWIB.getMinutes()).padStart(2, '0');
-        const currentTimeStr = `${currentHours}:${currentMinutes}`;
+        // Ambil waktu jam:menit saat ini di WIB secara akurat
+        const currentTimeStr = new Intl.DateTimeFormat('en-GB', {
+            timeZone: 'Asia/Jakarta',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+        }).format(new Date());
 
         // 1. DAILY BRIEFING
         const briefingUsers = await db.query(

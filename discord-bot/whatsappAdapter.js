@@ -606,6 +606,77 @@ async function handleWebhookEvent(req, res, rawBody) {
                     continue;
                 }
 
+                // 1e. Cek Rekap Keuangan Hari Ini (!keuangan / !pengeluaran / !saldo)
+                if (/^(!keuangan|!pengeluaran|!saldo|keuangan|pengeluaran|saldo)$/i.test(textContent.trim())) {
+                    const resFinance = await db.query(
+                        `SELECT 
+                            COALESCE(SUM(CASE WHEN kind = 'expense' THEN amount ELSE 0 END), 0) AS total_expense,
+                            COALESCE(SUM(CASE WHEN kind = 'income' THEN amount ELSE 0 END), 0) AS total_income,
+                            COUNT(*) AS total_count
+                         FROM financial_transactions
+                         WHERE (user_id = $1 OR user_id = $2)
+                           AND deleted_at IS NULL
+                           AND (occurred_at AT TIME ZONE 'Asia/Jakarta')::date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date;`,
+                        [internalUserId || fromNumber, cleanPhone]
+                    );
+
+                    const listFinance = await db.query(
+                        `SELECT kind, amount, category, description 
+                         FROM financial_transactions
+                         WHERE (user_id = $1 OR user_id = $2)
+                           AND deleted_at IS NULL
+                           AND (occurred_at AT TIME ZONE 'Asia/Jakarta')::date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date
+                         ORDER BY occurred_at DESC
+                         LIMIT 10;`,
+                        [internalUserId || fromNumber, cleanPhone]
+                    );
+
+                    const totExp = parseFloat(resFinance.rows[0]?.total_expense || 0);
+                    const totInc = parseFloat(resFinance.rows[0]?.total_income || 0);
+                    const net = totInc - totExp;
+                    const formatRp = (n) => 'Rp ' + Math.round(Number(n) || 0).toLocaleString('id-ID');
+
+                    let msg = `💰 *REKAP KEUANGAN HARI INI [${senderName}]*\n`;
+                    msg += `• Total Pengeluaran : *${formatRp(totExp)}*\n`;
+                    msg += `• Total Pemasukan   : *${formatRp(totInc)}*\n`;
+                    msg += `• Saldo Harian      : *${formatRp(net)}*\n\n`;
+
+                    if (listFinance.rowCount === 0) {
+                        msg += `ℹ️ Belum ada transaksi yang dicatat hari ini. Cukup bilang *"Amba, catat pengeluaran 25rb buat kopi"* untuk mencatat! ☕`;
+                    } else {
+                        msg += `*Rincian Transaksi:*\n`;
+                        listFinance.rows.forEach((t, i) => {
+                            const ic = t.kind === 'expense' ? '🔴' : '🟢';
+                            msg += `${i + 1}. ${ic} *${formatRp(t.amount)}* — ${t.description} (\`${t.category}\`)\n`;
+                        });
+                    }
+
+                    await sendWhatsAppTextMessage(fromNumber, msg);
+                    continue;
+                }
+
+                // 1f. Cek Memori Pengguna (!memori / !ingatan / !memory)
+                if (/^(!memori|!ingatan|!memory|memori|ingatan)$/i.test(textContent.trim())) {
+                    const resMem = await db.query(
+                        `SELECT key, value, type 
+                         FROM memories 
+                         WHERE (user_id = $1 OR user_id = $2) AND status = 'ACTIVE'
+                         ORDER BY importance DESC, updated_at DESC
+                         LIMIT 15;`,
+                        [internalUserId || fromNumber, cleanPhone]
+                    );
+                    let msg = `🧠 *INGATAN AMBA TENTANG [${senderName}]* (Total: ${resMem.rowCount})\n\n`;
+                    if (resMem.rowCount === 0) {
+                        msg += `ℹ️ Belum ada memori khusus yang tersimpan. Kamu bisa beri tahu Amba hal baru kapan saja! (misal: *"Amba, ingat ya gue suka kopi"*).`;
+                    } else {
+                        resMem.rows.forEach((m, i) => {
+                            msg += `${i + 1}. • *${m.key}*: ${m.value}\n`;
+                        });
+                    }
+                    await sendWhatsAppTextMessage(fromNumber, msg);
+                    continue;
+                }
+
                 // 2. Lihat Daftar User Terdaftar (!role list / !user list - Khusus Owner)
                 if (/^!(?:role\s+list|user\s+list|daftar\s+user|list\s+user)$/i.test(textContent.trim())) {
                     if (!isOwner) {
