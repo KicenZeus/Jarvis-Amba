@@ -449,7 +449,7 @@ async function checkAndSendProactiveMessages(client = null) {
                 userId: r.user_id,
                 eventType: 'REMINDER',
                 text: text,
-                context: { channelId: r.channel_id, reminderId: r.id },
+                context: { channelId: r.channel_id, reminderId: r.id, priority: r.priority, bypassQuietHours: true },
                 discordClient: client,
             });
 
@@ -457,9 +457,16 @@ async function checkAndSendProactiveMessages(client = null) {
                 console.log(`⏰ Pengingat #${r.id} berhasil terpicu & dikirim ke user ${r.user_id}`);
             } else {
                 console.log(`ℹ️ [Notification] Pengingat #${r.id} tidak terkirim: ${smartRes.reason}`);
+                // Jika gagal bukan karena dinonaktifkan sengaja, reschedule 1 menit lagi agar alarm tidak hilang
+                if (smartRes.reason !== 'DISABLED_BY_USER') {
+                    await db.query(
+                        `UPDATE reminders SET status = 'pending', snooze_until = NOW() + INTERVAL '1 minute', sent_at = NULL WHERE id = $1`,
+                        [r.id]
+                    ).catch(() => {});
+                }
             }
 
-            if (r.repeat_rule) {
+            if (r.repeat_rule && smartRes.success) {
                 handleRecurringReminder(r.id).catch((err) =>
                     console.error('⚠️ Gagal menjadwalkan recurring reminder:', err.message)
                 );

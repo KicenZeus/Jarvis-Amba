@@ -158,7 +158,14 @@ async function resolveNotificationDestinations(userId, eventType, context = {}) 
         }
 
         // 2. Cek Jam Tenang (Quiet Hours)
-        if (pref && isQuietHours(pref.quiet_hours_start, pref.quiet_hours_end)) {
+        // PENGINGAT (REMINDER) yang diminta user secara eksplisit dan notifikasi prioritas tinggi tidak boleh di-drop oleh Jam Tenang
+        const isExemptFromQuietHours = 
+            context.bypassQuietHours || 
+            eventType === 'REMINDER' || 
+            String(context.priority || '').toUpperCase() === 'URGENT' || 
+            String(context.priority || '').toUpperCase() === 'HIGH';
+
+        if (!isExemptFromQuietHours && pref && isQuietHours(pref.quiet_hours_start, pref.quiet_hours_end)) {
             console.log(`🌙 [NotificationService] Notifikasi ${eventType} diabaikan/ditunda karena Jam Tenang (${pref.quiet_hours_start} - ${pref.quiet_hours_end}) untuk user ${userId}`);
             return { shouldSend: false, reason: 'QUIET_HOURS', targets: [] };
         }

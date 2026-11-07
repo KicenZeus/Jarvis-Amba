@@ -41,8 +41,43 @@ function parseDateTimeWIB(timeStr) {
         return new Date(Date.UTC(Y, M - 1, D, h - 7, m, s));
     }
 
-    // 3. Format jam saja (contoh: 17:00 atau 17.00)
-    const timeMatch = str.match(/^(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?$/);
+    // 3. Format relatif ke depan (contoh: '10 menit lagi', '2 jam lagi', '30 detik lagi', '1 hari lagi')
+    const relMatch = str.match(/^(?:dalam\s+)?(\d+)\s*(menit|mnt|m|minutes?|min|jam|j|hours?|h|hari|hri|days?|d|detik|dtk|seconds?|s)(?:\s*(?:lagi|kemudian|ke\s*depan))?$/i);
+    if (relMatch) {
+        const val = parseInt(relMatch[1], 10);
+        const unit = relMatch[2].toLowerCase();
+        let ms = 0;
+        if (/^(menit|mnt|m|minutes?|min)$/.test(unit)) ms = val * 60 * 1000;
+        else if (/^(jam|j|hours?|h)$/.test(unit)) ms = val * 60 * 60 * 1000;
+        else if (/^(hari|hri|days?|d)$/.test(unit)) ms = val * 24 * 60 * 60 * 1000;
+        else if (/^(detik|dtk|seconds?|s)$/.test(unit)) ms = val * 1000;
+        return new Date(Date.now() + ms);
+    }
+
+    // 4. Kata 'besok' atau 'lusa' dengan jam (contoh: 'besok jam 08:00', 'besok 08.00', 'lusa pukul 14:00')
+    const dayRelMatch = str.match(/^(besok|lusa)(?:\s+(?:jam|pukul)?)?\s+(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?$/i);
+    if (dayRelMatch) {
+        const dayOffset = dayRelMatch[1].toLowerCase() === 'lusa' ? 2 : 1;
+        const h = parseInt(dayRelMatch[2], 10);
+        const m = parseInt(dayRelMatch[3], 10);
+        const s = parseInt(dayRelMatch[4] || '0', 10);
+
+        const parts = new Intl.DateTimeFormat('en-GB', {
+            timeZone: 'Asia/Jakarta',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour12: false,
+        }).formatToParts(new Date()).reduce((acc, p) => ({ ...acc, [p.type]: p.value }), {});
+
+        const Y = parseInt(parts.year, 10);
+        const M = parseInt(parts.month, 10);
+        const D = parseInt(parts.day, 10);
+        return new Date(Date.UTC(Y, M - 1, D + dayOffset, h - 7, m, s));
+    }
+
+    // 5. Format jam saja (contoh: 17:00, 17.00, jam 17:00, pukul 08.30)
+    const timeMatch = str.match(/^(?:(?:jam|pukul)\s+)?(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?$/i);
     if (timeMatch) {
         const h = parseInt(timeMatch[1], 10);
         const m = parseInt(timeMatch[2], 10);

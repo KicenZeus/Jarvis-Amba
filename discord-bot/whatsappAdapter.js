@@ -19,7 +19,7 @@ const { generateDirectGeminiReply } = require('./aiDirectService');
  * Meta mengirimkan: hub.mode, hub.verify_token, hub.challenge
  */
 function handleWebhookVerification(req, res, urlObj) {
-    const verifyToken = process.env.WA_VERIFY_TOKEN || 'jarvis_amba_wa_secret_2026';
+    const verifyToken = process.env.WA_VERIFY_TOKEN || process.env.WHATSAPP_VERIFY_TOKEN || 'jarvis_amba_wa_secret_2026';
     const mode = urlObj.searchParams.get('hub.mode');
     const token = urlObj.searchParams.get('hub.verify_token');
     const challenge = urlObj.searchParams.get('hub.challenge');

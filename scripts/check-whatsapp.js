@@ -1,7 +1,7 @@
 /**
  * ==============================================================================
  * Jarvis V2.1: WhatsApp Webhook & Tunnel Status Checker
- * Menampilkan URL Webhook aktif dan memvalidasi koneksi end-to-end
+ * Menampilkan URL Webhook aktif (Railway Cloud / Local Tunnel) & memvalidasi status
  * ==============================================================================
  */
 
@@ -13,72 +13,75 @@ try {
     require('dotenv').config({ path: path.join(__dirname, '../discord-bot/.env') });
 } catch (_) {}
 
-async function main() {
-    console.log('\n===================================================================');
-    console.log('       JARVIS V2.1 - STATUS WHATSAPP META WEBHOOK & TUNNEL         ');
-    console.log('===================================================================\n');
-
-    let tunnelUrl = null;
-    try {
-        // Ambil 100 baris terakhir dari instance tunnel yang sedang aktif saat ini
-        let logs = '';
-        try {
-            logs = execSync('docker compose logs --tail 100 tunnel', {
-                encoding: 'utf8',
-                maxBuffer: 10 * 1024 * 1024,
-            });
-        } catch (_) {
-            logs = execSync('docker logs --tail 100 jarvis-tunnel 2>&1', {
-                encoding: 'utf8',
-                maxBuffer: 10 * 1024 * 1024,
-            });
-        }
-        let matches = [...logs.matchAll(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/g)];
-        if (matches.length > 0) {
-            tunnelUrl = matches[matches.length - 1][0];
-        }
-    } catch (err) {
-        console.error('❌ Gagal membaca log jarvis-tunnel:', err.message);
-        return;
-    }
-
-    if (!tunnelUrl) {
-        console.error('⚠️  URL Cloudflare Tunnel belum ditemukan.');
-        console.log('   Pastikan container jarvis-tunnel sedang berjalan: docker compose ps\n');
-        return;
-    }
-
-    const webhookUrl = `${tunnelUrl}/webhook/whatsapp`;
-    const verifyToken = process.env.WA_VERIFY_TOKEN || 'jarvis_amba_wa_secret_2026';
-
-    console.log('📌 INFORMASI UNTUK META DEVELOPER DASHBOARD:');
-    console.log('-------------------------------------------------------------------');
-    console.log(`🔗 URL Callback    : ${webhookUrl}`);
-    console.log(`🔑 Token Verifikasi: ${verifyToken}`);
-    console.log('-------------------------------------------------------------------\n');
-
-    console.log('🔍 Menguji respon webhook lokal melalui tunnel...');
+async function testWebhook(webhookUrl, verifyToken) {
     try {
         const testUrl = `${webhookUrl}?hub.mode=subscribe&hub.verify_token=${verifyToken}&hub.challenge=STATUS_OK`;
         const res = await fetch(testUrl);
         const body = await res.text();
+        return { ok: res.ok && body === 'STATUS_OK', status: res.status, body };
+    } catch (err) {
+        return { ok: false, error: err.message };
+    }
+}
 
-        if (res.ok && body === 'STATUS_OK') {
-            console.log('✅ Webhook Endpoint: ONLINE & VALID! (Respon 200 OK)');
-        } else {
-            console.warn(`⚠️  Webhook merespon dengan status ${res.status}: ${body}`);
-        }
-    } catch (netErr) {
-        console.error('❌ Gagal menghubungi tunnel:', netErr.message);
-        console.log('   (Tunggu sekitar 10-30 detik jika tunnel baru saja dinyalakan)\n');
+async function main() {
+    console.log('\n===================================================================');
+    console.log('       JARVIS V2.1 - STATUS WHATSAPP META WEBHOOK & ENDPOINTS       ');
+    console.log('===================================================================\n');
+
+    const verifyToken = process.env.WA_VERIFY_TOKEN || process.env.WHATSAPP_VERIFY_TOKEN || 'jarvis_amba_wa_secret_2026';
+    const railwayBase = process.env.BOT_URL || 'https://jarvis-amba-production.up.railway.app';
+    const railwayWebhook = `${railwayBase}/webhook/whatsapp`;
+
+    console.log(`🌐 1. MEMERIKSA WEBHOOK PRODUCTION (RAILWAY CLOUD)...`);
+    console.log(`   URL Endpoint : ${railwayWebhook}`);
+    const cloudTest = await testWebhook(railwayWebhook, verifyToken);
+    if (cloudTest.ok) {
+        console.log(`   ✅ Status    : ONLINE & VALID! (Respon HTTP 200 OK)`);
+    } else {
+        console.log(`   ⚠️ Status    : ${cloudTest.error ? cloudTest.error : `HTTP ${cloudTest.status} (${cloudTest.body})`}`);
     }
 
-    console.log('\n📋 LANGKAH SINKRONISASI JIKA WHATSAPP BELUM MERESPON:');
-    console.log('1. Buka https://developers.facebook.com/apps/ > Pilih aplikasi "Jarvis Amba"');
-    console.log('2. Buka menu: WhatsApp > Konfigurasi > bagian Webhook');
-    console.log('3. Klik "Edit" dan tempelkan URL Callback di atas');
-    console.log('4. Masukkan Token Verifikasi di atas lalu klik "Verifikasi dan Simpan"');
-    console.log('5. Pastikan kolom "messages" berstatus Berlangganan (Subscribed)');
+    // Periksa tunnel lokal Docker jika ada
+    let tunnelUrl = null;
+    try {
+        let logs = '';
+        try {
+            logs = execSync('docker compose logs --tail 100 tunnel 2>nul', { encoding: 'utf8' });
+        } catch (_) {
+            logs = execSync('docker logs --tail 100 jarvis-tunnel 2>nul', { encoding: 'utf8' });
+        }
+        const matches = [...logs.matchAll(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/g)];
+        if (matches.length > 0) {
+            tunnelUrl = matches[matches.length - 1][0];
+        }
+    } catch (_) {}
+
+    if (tunnelUrl) {
+        console.log(`\n🏠 2. MEMERIKSA WEBHOOK LOKAL (CLOUDFLARE TUNNEL)...`);
+        console.log(`   URL Tunnel   : ${tunnelUrl}/webhook/whatsapp`);
+        const localTest = await testWebhook(`${tunnelUrl}/webhook/whatsapp`, verifyToken);
+        if (localTest.ok) {
+            console.log(`   ✅ Status    : ONLINE & VALID! (Respon HTTP 200 OK)`);
+        } else {
+            console.log(`   ⚠️ Status    : ${localTest.error || `HTTP ${localTest.status}`}`);
+        }
+    }
+
+    const activeWebhookUrl = cloudTest.ok ? railwayWebhook : (tunnelUrl ? `${tunnelUrl}/webhook/whatsapp` : railwayWebhook);
+
+    console.log('\n📌 INFORMASI RESMI UNTUK META DEVELOPER DASHBOARD:');
+    console.log('-------------------------------------------------------------------');
+    console.log(`🔗 URL Callback    : ${activeWebhookUrl}`);
+    console.log(`🔑 Token Verifikasi: ${verifyToken}`);
+    console.log('-------------------------------------------------------------------\n');
+
+    console.log('📋 PANDUAN PENGATURAN DI META DASHBOARD:');
+    console.log('1. Buka https://developers.facebook.com/apps/ > Pilih aplikasi Jarvis');
+    console.log('2. Buka menu: WhatsApp > Konfigurasi > Bagian Webhook');
+    console.log('3. Klik "Edit", masukkan URL Callback dan Token Verifikasi di atas');
+    console.log('4. Klik "Verifikasi dan Simpan"');
+    console.log('5. Di kolom Webhook Fields, pastikan event "messages" sudah Berlangganan (Subscribed)');
     console.log('===================================================================\n');
 }
 
