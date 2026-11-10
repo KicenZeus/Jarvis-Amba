@@ -22,6 +22,31 @@ export default function RemindersScreen({ reminders, onRefresh, refreshing }) {
 
   const active = reminders.filter(r => r.status === 'pending');
 
+  const setQuickTime = (minutesAhead) => {
+    const target = new Date(Date.now() + minutesAhead * 60 * 1000);
+    const year = target.getFullYear();
+    const month = String(target.getMonth() + 1).padStart(2, '0');
+    const day = String(target.getDate()).padStart(2, '0');
+    const hours = String(target.getHours()).padStart(2, '0');
+    const mins = String(target.getMinutes()).padStart(2, '0');
+    setRemindAt(`${year}-${month}-${day}T${hours}:${mins}:00`);
+  };
+
+  const setTomorrowMorning = () => {
+    const target = new Date();
+    target.setDate(target.getDate() + 1);
+    target.setHours(6, 0, 0, 0);
+    const year = target.getFullYear();
+    const month = String(target.getMonth() + 1).padStart(2, '0');
+    const day = String(target.getDate()).padStart(2, '0');
+    setRemindAt(`${year}-${month}-${day}T06:00:00`);
+  };
+
+  const handleOpenModal = () => {
+    setQuickTime(10);
+    setModalVisible(true);
+  };
+
   const handleSnooze = async (id) => {
     try {
       await mobileApi.snoozeReminder(id, 10);
@@ -75,7 +100,7 @@ export default function RemindersScreen({ reminders, onRefresh, refreshing }) {
     <View style={styles.container}>
       <View style={styles.topBar}>
         <Text style={styles.headerTitle}>Alarm & Pengingat Aktif ({active.length})</Text>
-        <TouchableOpacity style={styles.addBtn} onPress={() => setModalVisible(true)}>
+        <TouchableOpacity style={styles.addBtn} onPress={handleOpenModal}>
           <Text style={styles.addBtnText}>+ Set Alarm</Text>
         </TouchableOpacity>
       </View>
@@ -137,9 +162,28 @@ export default function RemindersScreen({ reminders, onRefresh, refreshing }) {
               style={styles.modalInput}
               value={remindAt}
               onChangeText={setRemindAt}
-              placeholder="YYYY-MM-DDTHH:mm:ss"
+              placeholder="Waktu: YYYY-MM-DDTHH:mm:ss"
               placeholderTextColor="#64748b"
             />
+
+            {/* Quick Presets */}
+            <View style={styles.presetsRow}>
+              <TouchableOpacity style={styles.presetChip} onPress={() => setQuickTime(5)}>
+                <Text style={styles.presetChipText}>+5 Mnt</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.presetChip} onPress={() => setQuickTime(15)}>
+                <Text style={styles.presetChipText}>+15 Mnt</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.presetChip} onPress={() => setQuickTime(30)}>
+                <Text style={styles.presetChipText}>+30 Mnt</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.presetChip} onPress={() => setQuickTime(60)}>
+                <Text style={styles.presetChipText}>+1 Jam</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.presetChip} onPress={setTomorrowMorning}>
+                <Text style={styles.presetChipText}>Pagi 06:00</Text>
+              </TouchableOpacity>
+            </View>
 
             <View style={styles.modeSelector}>
               <TouchableOpacity 
@@ -327,7 +371,26 @@ const styles = StyleSheet.create({
     fontSize: 13,
     borderWidth: 1,
     borderColor: '#334155',
-    marginBottom: 10,
+    marginBottom: 8,
+  },
+  presetsRow: {
+    flexDirection: 'row',
+    gap: 6,
+    marginBottom: 14,
+    flexWrap: 'wrap',
+  },
+  presetChip: {
+    backgroundColor: '#1e293b',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  presetChipText: {
+    color: '#38bdf8',
+    fontSize: 11,
+    fontWeight: '600',
   },
   modeSelector: {
     flexDirection: 'row',

@@ -188,6 +188,20 @@ export default function FinanceScreen({ transactions, onRefresh, refreshing }) {
               placeholderTextColor="#64748b"
             />
 
+            {/* Payment Method Selector */}
+            <Text style={styles.methodLabel}>Metode Pembayaran / Sumber Dana:</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.methodScroll}>
+              {['Cash', 'BCA', 'Mandiri', 'BRI', 'GoPay', 'OVO', 'Dana', 'ShopeePay', 'QRIS'].map((m) => (
+                <TouchableOpacity 
+                  key={m}
+                  style={[styles.methodChip, paymentMethod === m && styles.activeMethodChip]}
+                  onPress={() => setPaymentMethod(m)}
+                >
+                  <Text style={[styles.methodChipText, paymentMethod === m && styles.activeMethodChipText]}>{m}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
             <View style={styles.modalActions}>
               <TouchableOpacity style={styles.cancelBtn} onPress={() => setModalVisible(false)}>
                 <Text style={styles.cancelText}>Batal</Text>
@@ -433,6 +447,37 @@ const styles = StyleSheet.create({
   saveText: {
     color: '#ffffff',
     fontSize: 12,
+    fontWeight: '700',
+  },
+  methodLabel: {
+    fontSize: 11,
+    color: '#94a3b8',
+    marginBottom: 6,
+    fontWeight: '600',
+  },
+  methodScroll: {
+    marginBottom: 12,
+  },
+  methodChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#334155',
+    marginRight: 6,
+  },
+  activeMethodChip: {
+    backgroundColor: '#4f46e5',
+    borderColor: '#6366f1',
+  },
+  methodChipText: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  activeMethodChipText: {
+    color: '#ffffff',
     fontWeight: '700',
   },
 });

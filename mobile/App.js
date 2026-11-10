@@ -13,6 +13,7 @@ import { mobileApi, setMobileAuthToken, getMobileAuthToken } from './src/service
 import { supabase } from './src/services/supabase';
 import { registerCurrentDevice, getOrCreateDeviceIdentifier } from './src/services/deviceService';
 import { AlarmModule } from './src/native/AlarmModule';
+import * as Notifications from 'expo-notifications';
 import Header from './src/components/Header';
 import BottomTabBar from './src/components/BottomTabBar';
 import HomeScreen from './src/screens/HomeScreen';
@@ -122,6 +123,45 @@ export default function App() {
     return () => {
       if (heartbeatTimer) clearInterval(heartbeatTimer);
     };
+  }, [token]);
+
+  // Request Notification Permissions & Alarm Response Listener
+  useEffect(() => {
+    Notifications.requestPermissionsAsync().catch(() => {});
+
+    const responseSub = Notifications.addNotificationResponseReceivedListener(response => {
+      const data = response.notification.request.content.data;
+      if (data?.reminderId) {
+        setActiveTab('reminders');
+      }
+    });
+
+    return () => {
+      responseSub.remove();
+    };
+  }, []);
+
+  // Polling Interval Otomatis (setiap 5 detik) agar data otomatis sinkron instan
+  // tanpa harus pull-to-refresh manual saat ada pesan chat/WA/Discord masuk
+  useEffect(() => {
+    if (!token) return;
+
+    const pollTimer = setInterval(() => {
+      mobileApi.getReminders().then(res => {
+        if (res.reminders) {
+          setReminders(res.reminders);
+          AlarmModule.syncWithServer();
+        }
+      }).catch(() => {});
+      mobileApi.getTasks().then(res => {
+        if (res.tasks) setTasks(res.tasks);
+      }).catch(() => {});
+      mobileApi.getFinanceSummary().then(res => {
+        if (res) setSummary(res);
+      }).catch(() => {});
+    }, 5000);
+
+    return () => clearInterval(pollTimer);
   }, [token]);
 
   // Realtime Subscriptions via Supabase

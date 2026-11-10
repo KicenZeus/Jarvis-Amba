@@ -1,56 +1,101 @@
-import { Platform, NativeModules } from 'react-native';
+import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Notifications from 'expo-notifications';
 import { mobileApi } from '../services/api';
 
+// 1. Konfigurasi handler notifikasi agar alarm berbunyi keras dengan getar di foreground
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+    priority: Notifications.AndroidNotificationPriority.MAX,
+  }),
+});
+
+const ALARM_CHANNEL_ID = 'jarvis-physical-alarm';
 const STORAGE_KEY_LOCAL_ALARMS = 'jarvis_local_alarms';
 
 /**
  * Jarvis Android Alarm Engine (PRD V3 Sec 20, 25 & 31)
- * Menjadwalkan alarm fisik presisi via Android AlarmManager.setAlarmClock()
+ * Menggunakan expo-notifications channel berkategori ALARM dengan prioritas MAX,
+ * bypass Do Not Disturb, dan getaran berulang menyerupai alarm fisik bawaan ponsel.
  */
 class JarvisAlarmEngine {
   constructor() {
-    this.scheduledAlarms = new Map();
+    this.channelReady = false;
+    this.initAlarmChannel();
   }
 
   /**
-   * Menjadwalkan alarm lokal pada waktu presisi
-   * @param {object} reminder - { id, reminder_text, remind_at, channel_id }
+   * Inisialisasi saluran notifikasi berkategori ALARM di Android
+   */
+  async initAlarmChannel() {
+    if (Platform.OS === 'android') {
+      try {
+        await Notifications.setNotificationChannelAsync(ALARM_CHANNEL_ID, {
+          name: 'Alarm Fisik Jarvis',
+          description: 'Saluran alarm fisik dengan prioritas maksimal & getaran keras',
+          importance: Notifications.AndroidImportance.MAX,
+          sound: 'default',
+          vibrationPattern: [0, 800, 400, 800, 400, 800, 400, 800],
+          bypassDnd: true,
+          lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+          enableLights: true,
+          lightColor: '#6366f1',
+        });
+        this.channelReady = true;
+      } catch (err) {
+        console.warn('⚠️ [AlarmEngine] Gagal inisialisasi channel alarm:', err.message);
+      }
+    }
+  }
+
+  /**
+   * Menjadwalkan alarm lokal fisik pada waktu presisi
+   * @param {object} reminder - { id, reminder_text, remind_at, delivery_mode }
    */
   async scheduleAlarm(reminder) {
     if (!reminder || !reminder.remind_at) return false;
 
-    const triggerMs = new Date(reminder.remind_at).getTime();
+    const triggerDate = new Date(reminder.remind_at);
+    const triggerMs = triggerDate.getTime();
     if (isNaN(triggerMs) || triggerMs <= Date.now()) {
       return false; // Jangan jadwalkan alarm di masa lalu
     }
 
     try {
-      // 1. Simpan ke local cache untuk reboot recovery
+      await this.initAlarmChannel();
       await this.persistAlarmLocally(reminder);
 
-      // 2. Jika di Android native, panggil AlarmManager.setAlarmClock via bridge jika terpasang
-      if (Platform.OS === 'android' && NativeModules.JarvisAlarmModule) {
-        NativeModules.JarvisAlarmModule.setExactAlarm(
-          reminder.id,
-          triggerMs,
-          reminder.reminder_text || reminder.title || 'Pengingat Jarvis'
-        );
-      } else {
-        // Fallback timer untuk mode expo development
-        const delayMs = triggerMs - Date.now();
-        if (delayMs < 2147483647) { // 32-bit int limit
-          const timerId = setTimeout(() => {
-            this.triggerLocalAlarm(reminder);
-          }, delayMs);
-          this.scheduledAlarms.set(reminder.id, timerId);
-        }
-      }
+      // Batalkan alarm lama jika ada id yang sama
+      await this.cancelAlarm(reminder.id);
 
-      console.log(`⏰ [AlarmEngine] Alarm '${reminder.reminder_text || reminder.title}' dijadwalkan pada ${new Date(triggerMs).toLocaleTimeString()}`);
+      // Jadwalkan notifikasi fisik Android berbasis AlarmManager
+      const notificationId = await Notifications.scheduleNotificationAsync({
+        identifier: `alarm_${reminder.id}`,
+        content: {
+          title: '⏰ ALARM JARVIS',
+          body: reminder.reminder_text || reminder.title || 'Waktunya pengingat Jarvis!',
+          sound: 'default',
+          priority: Notifications.AndroidNotificationPriority.MAX,
+          vibrate: [0, 800, 400, 800, 400, 800, 400, 800],
+          data: {
+            reminderId: reminder.id,
+            isAlarm: true,
+            deliveryMode: reminder.delivery_mode || 'ALARM',
+          },
+        },
+        trigger: {
+          date: triggerDate,
+          channelId: ALARM_CHANNEL_ID,
+        },
+      });
+
+      console.log(`⏰ [AlarmEngine] Alarm fisik dijadwalkan: ${notificationId} pada ${triggerDate.toLocaleTimeString()}`);
       return true;
     } catch (err) {
-      console.warn('⚠️ [AlarmEngine] Gagal menjadwalkan alarm:', err.message);
+      console.warn('⚠️ [AlarmEngine] Gagal menjadwalkan alarm fisik:', err.message);
       return false;
     }
   }
@@ -60,15 +105,7 @@ class JarvisAlarmEngine {
    */
   async cancelAlarm(reminderId) {
     try {
-      if (this.scheduledAlarms.has(reminderId)) {
-        clearTimeout(this.scheduledAlarms.get(reminderId));
-        this.scheduledAlarms.delete(reminderId);
-      }
-
-      if (Platform.OS === 'android' && NativeModules.JarvisAlarmModule) {
-        NativeModules.JarvisAlarmModule.cancelAlarm(reminderId);
-      }
-
+      await Notifications.cancelScheduledNotificationAsync(`alarm_${reminderId}`);
       await this.removeLocalAlarm(reminderId);
       console.log(`⏰ [AlarmEngine] Alarm #${reminderId} dibatalkan.`);
       return true;
@@ -79,19 +116,7 @@ class JarvisAlarmEngine {
   }
 
   /**
-   * Memicu bunyi alarm layar penuh dan mengirimkan ACK ke server
-   */
-  async triggerLocalAlarm(reminder) {
-    console.log(`🚨 [AlarmEngine] ALARM BUNYI: "${reminder.reminder_text || reminder.title}"`);
-    
-    // Kirim ACK penerimaan alarm ke server (PRD V3 Sec 35)
-    try {
-      await mobileApi.ackAlarm(reminder.id);
-    } catch (_) {}
-  }
-
-  /**
-   * Menyelaraskan seluruh alarm lokal dengan 20 reminder mendatang dari server (PRD V3 Sec 20.3)
+   * Menyelaraskan seluruh alarm lokal dengan reminder mendatang dari server (PRD V3 Sec 20.3)
    */
   async syncWithServer() {
     try {
@@ -101,7 +126,9 @@ class JarvisAlarmEngine {
         .slice(0, 20);
 
       for (const r of upcoming) {
-        await this.scheduleAlarm(r);
+        if (r.delivery_mode === 'ALARM' || !r.delivery_mode) {
+          await this.scheduleAlarm(r);
+        }
       }
       return upcoming.length;
     } catch (err) {
@@ -133,4 +160,3 @@ class JarvisAlarmEngine {
 }
 
 export const AlarmModule = new JarvisAlarmEngine();
-
