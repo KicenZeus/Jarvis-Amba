@@ -73,3 +73,20 @@ tmp/
 temp/
 .system_generated/
 .gemini/
+
+# 9. Frontend & Mobile Build Outputs
+dist/
+**/dist/
+build/
+**/build/
+.expo/
+**/.expo/
+android/
+**/android/
+ios/
+**/ios/
+web-build/
+*.apk
+*.aab
+*.tsbuildinfo
+

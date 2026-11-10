@@ -15,6 +15,10 @@
 
 const db = require('./db');
 const { normalizePriority, getPriorityBadge } = require('./scheduleService');
+const {
+    resolveUserPersonality,
+    buildPersonalitySystemInstruction,
+} = require('./personalityService');
 
 /**
  * Parsing waktu fleksibel (ISO string, HH:mm, atau relatif) ke objek Date (Akurat WIB UTC+7)
@@ -153,8 +157,12 @@ const TOOLS_DECLARATIONS = [
                 },
                 category: {
                     type: 'STRING',
-                    enum: ['makanan', 'transportasi', 'belanja', 'hiburan', 'tagihan', 'kesehatan', 'pendidikan', 'pendapatan', 'lainnya'],
+                    enum: ['makanan', 'transportasi', 'belanja', 'hiburan', 'tagihan', 'kesehatan', 'pendidikan', 'pendapatan', 'gaji', 'transfer', 'lainnya'],
                     description: 'Kategori transaksi (default: "makanan" jika makanan/minuman, "transportasi" jika bensin/ojek, "tagihan" jika listrik/pulsa, dll.)',
+                },
+                payment_method: {
+                    type: 'STRING',
+                    description: 'Metode pembayaran jika disebutkan (contoh: "Cash", "BCA", "Mandiri", "BRI", "GoPay", "OVO", "ShopeePay"). Default: "Cash".',
                 },
                 occurred_at: {
                     type: 'STRING',
@@ -166,7 +174,7 @@ const TOOLS_DECLARATIONS = [
     },
     {
         name: 'get_finances',
-        description: 'Melihat rangkuman dan riwayat transaksi keuangan (pengeluaran dan/atau pemasukan) pengguna dari database. Gunakan saat pengguna bertanya pengeluarannya ("berapa pengeluaran gw hari ini?", "cek pengeluaran", "rekap keuangan minggu ini", "ada transaksi apa aja?").',
+        description: 'Melihat rangkuman dan riwayat transaksi keuangan (pengeluaran dan/atau pemasukan) pengguna dari database. Gunakan saat pengguna bertanya pengeluarannya ("berapa pengeluaran gw hari ini?", "cek pengeluaran", "rekap keuangan minggu ini", "ada transaksi apa aja?", "tampilkan pengeluaran terbesar").',
         parameters: {
             type: 'OBJECT',
             properties: {
@@ -179,6 +187,15 @@ const TOOLS_DECLARATIONS = [
                     type: 'STRING',
                     enum: ['all', 'expense', 'income'],
                     description: 'Jenis transaksi yang ingin dicek: "all" (semua), "expense" (hanya pengeluaran), "income" (hanya pemasukan). Default: "all".',
+                },
+                category: {
+                    type: 'STRING',
+                    description: 'Filter kategori tertentu jika diminta pengguna (contoh: "makanan", "transportasi", "belanja", "gaji").',
+                },
+                order_by: {
+                    type: 'STRING',
+                    enum: ['recent', 'largest'],
+                    description: 'Urutan hasil transaksi: "recent" (paling baru) atau "largest" (nominal transaksi terbesar). Default: "recent".',
                 },
                 limit: {
                     type: 'INTEGER',
@@ -218,6 +235,16 @@ const TOOLS_DECLARATIONS = [
                     type: 'STRING',
                     enum: ['LOW', 'MEDIUM', 'HIGH', 'URGENT'],
                     description: 'Tingkat kepentingan pengingat (default: MEDIUM)',
+                },
+                delivery_mode: {
+                    type: 'STRING',
+                    enum: ['CHAT', 'ALARM', 'CHAT_AND_ALARM'],
+                    description: 'Mode pengiriman: CHAT (pesan teks), ALARM (dering alarm fisik HP via Android AlarmClock), CHAT_AND_ALARM (keduanya). Default: CHAT.',
+                },
+                target_channels: {
+                    type: 'ARRAY',
+                    items: { type: 'STRING' },
+                    description: 'Kanal spesifik pengiriman (opsional, contoh: ["WHATSAPP", "ANDROID", "DISCORD"]).',
                 },
             },
             required: ['title', 'remind_at'],
@@ -435,12 +462,14 @@ async function generateDirectGeminiReply({
     userMessage,
     userId = null,
     channelId = null,
+    channelType = null,
     userName = 'Kawan',
     callsign = null,
     userRole = 'USER',
     memories = [],
     history = [],
     wantsVoice = false,
+    personality = null,
 }) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
@@ -450,10 +479,45 @@ async function generateDirectGeminiReply({
     const effectiveUserId = userId || '713137141072396370';
     const phoneTarget = channelId ? String(channelId).replace(/^wa_/, '') : effectiveUserId;
 
+    // Normalisasi / deteksi channel_type jika tidak diberikan eksplisit
+    let effectiveChannelType = channelType;
+    if (!effectiveChannelType) {
+        if (channelId && String(channelId).startsWith('wa_')) {
+            effectiveChannelType = 'WHATSAPP';
+        } else if (channelId && String(channelId).startsWith('web_')) {
+            effectiveChannelType = 'WEB';
+        } else if (channelId && (String(channelId).startsWith('android_') || String(channelId).startsWith('mobile_'))) {
+            effectiveChannelType = 'ANDROID';
+        } else if (channelId) {
+            effectiveChannelType = 'DISCORD';
+        } else {
+            effectiveChannelType = 'GLOBAL';
+        }
+    }
+
+    // Resolusi preferensi kepribadian (Channel Override > Global > Defaults)
+    let resolvedPersonality = personality;
+    if (!resolvedPersonality) {
+        try {
+            resolvedPersonality = await resolveUserPersonality(effectiveUserId, effectiveChannelType);
+        } catch (_) {
+            resolvedPersonality = {
+                response_style: 'CASUAL',
+                response_length: 'NORMAL',
+                tone: 'Tenang',
+                humor_level: 'BALANCED',
+                language: 'id-ID',
+                channel_type: effectiveChannelType,
+            };
+        }
+    }
+
     // Auto-fetch callsign & active memories dari Supabase jika belum terisi
     if (userId) {
         try {
-            if (!callsign) {
+            if (!callsign && resolvedPersonality?.callsign) {
+                callsign = resolvedPersonality.callsign;
+            } else if (!callsign) {
                 const uRes = await db.query(
                     'SELECT callsign, display_name FROM users WHERE id = $1 OR discord_user_id = $1 LIMIT 1',
                     [effectiveUserId]
@@ -476,6 +540,11 @@ async function generateDirectGeminiReply({
         } catch (_) {}
     }
 
+    if (callsign) {
+        resolvedPersonality.callsign = callsign;
+    }
+    const personalityBlock = buildPersonalitySystemInstruction(resolvedPersonality);
+
     const preferredGreeting = callsign || userName;
     let memoryBlock = '';
     if (Array.isArray(memories) && memories.length > 0) {
@@ -496,9 +565,10 @@ async function generateDirectGeminiReply({
         hour12: false,
     }).format(now) + ' WIB';
 
-    const systemInstruction = `Kamu adalah Jarvis (sering dipanggil Amba), asisten AI pribadi yang cerdas, proaktif, ramah, dan berkarakter santai-asyik dalam Bahasa Indonesia.
+    const systemInstruction = `Kamu adalah Jarvis (sering dipanggil Amba), asisten AI pribadi yang cerdas, adaptif, dan handal.
 Kamu melayani pengguna bernama "${preferredGreeting}" (Role: ${userRole}).
-${callsign ? `PENTING: Pengguna ini punya panggilan khusus ("${callsign}"). Panggil dia dengan "${callsign}" secara konsisten.` : `Panggil pengguna dengan namanya ("${preferredGreeting}"). Jangan panggil "Bos" kecuali pengguna yang memintanya.`}
+
+${personalityBlock}
 ${memoryBlock}
 
 WAKTU ACUAN SAAT INI:
@@ -508,9 +578,14 @@ Gunakan waktu acuan ini untuk menghitung jika pengguna meminta "10 menit lagi", 
 ATURAN PENGGUNAAN TOOLS (FUNGSI):
 1. KEUANGAN (PENGELUARAN & PEMASUKAN):
    - Jika pengguna menyebutkan pengeluaran (beli ..., bayar ..., keluar uang ...) atau pemasukan (gaji, dapat uang, terima transfer ...):
-     Panggil tool \`record_transaction\`! Pastikan 'amount' berupa angka murni Rupiah (contoh: 50rb -> 50000, 1.5jt -> 1500000).
-   - Jika pengguna BERTANYA tentang keuangan ("berapa pengeluaran hari ini?", "cek pengeluaran", "rekap keuangan minggu ini", "daftar transaksi"):
+     Panggil tool \`record_transaction\`!
+     - Pastikan 'amount' berupa angka murni Rupiah (contoh: 50rb -> 50000, 1.5jt -> 1500000).
+     - Deteksi 'payment_method' jika disebutkan (contoh: "Cash", "BCA", "Mandiri", "BRI", "GoPay", "OVO").
+     - Tentukan 'category' yang relevan (makanan, transportasi, belanja, tagihan, gaji, transfer, dll).
+   - Jika pengguna BERTANYA tentang keuangan ("berapa pengeluaran hari ini?", "cek pengeluaran", "rekap keuangan minggu ini", "pengeluaran terbesar bulan ini", "berapa biaya makan"):
      Panggil tool \`get_finances\`!
+     - Gunakan 'order_by: "largest"' jika pengguna menanyakan pengeluaran terbesar/tertinggi.
+     - Gunakan 'category' jika menanyakan kategori tertentu (contoh: "makanan", "transportasi").
    - Jika pengguna membatalkan/menghapus transaksi:
      Panggil tool \`delete_transaction\`!
 
@@ -590,12 +665,21 @@ Gaya Bahasa:
         },
     };
 
-    const res1 = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(initialRequestBody),
-        signal: AbortSignal.timeout(20000),
-    });
+    let res1;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        res1 = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(initialRequestBody),
+            signal: AbortSignal.timeout(20000),
+        });
+        if (res1.status === 429 && attempt < 2) {
+            console.warn(`⚠️ [Direct Gemini] Rate limited (429). Retrying attempt ${attempt + 1} after delay...`);
+            await new Promise((r) => setTimeout(r, 4000 * (attempt + 1)));
+            continue;
+        }
+        break;
+    }
 
     if (!res1.ok) {
         const errJson = await res1.json().catch(() => null);
@@ -623,23 +707,28 @@ Gaya Bahasa:
                 if (amount <= 0) throw new Error('Nominal transaksi harus lebih dari 0.');
 
                 const occurredAt = args.occurred_at ? parseDateTimeWIB(args.occurred_at) : new Date();
+                const paymentMethod = (args.payment_method && typeof args.payment_method === 'string') ? args.payment_method.trim() : 'Cash';
+                const category = args.category || (kind === 'expense' ? 'makanan' : 'pendapatan');
+                const description = args.description || (kind === 'expense' ? 'Pengeluaran' : 'Pemasukan');
+
                 const insertRes = await db.query(
-                    `INSERT INTO financial_transactions (user_id, kind, amount, currency, category, description, occurred_at, created_at, updated_at)
-                     VALUES ($1, $2, $3, 'IDR', $4, $5, $6, NOW(), NOW())
+                    `INSERT INTO financial_transactions (user_id, kind, amount, currency, category, description, payment_method, source_type, occurred_at, created_at, updated_at)
+                     VALUES ($1, $2, $3, 'IDR', $4, $5, $6, 'CHAT', $7, NOW(), NOW())
                      RETURNING *;`,
                     [
                         effectiveUserId,
                         kind,
                         amount,
-                        args.category || (kind === 'expense' ? 'makanan' : 'pendapatan'),
-                        args.description || (kind === 'expense' ? 'Pengeluaran' : 'Pemasukan'),
+                        category,
+                        description,
+                        paymentMethod,
                         occurredAt.toISOString(),
                     ]
                 );
 
                 const saved = insertRes.rows[0];
                 const formattedAmt = formatRupiah(saved.amount);
-                console.log(`💰 [Direct Gemini] Berhasil mencatat ${saved.kind} #${saved.id}: ${formattedAmt} ("${saved.description}")`);
+                console.log(`💰 [Direct Gemini] Berhasil mencatat ${saved.kind} #${saved.id}: ${formattedAmt} ("${saved.description}" via ${saved.payment_method})`);
 
                 toolResponse = {
                     success: true,
@@ -649,11 +738,15 @@ Gaya Bahasa:
                     formatted_amount: formattedAmt,
                     category: saved.category,
                     description: saved.description,
+                    payment_method: saved.payment_method || paymentMethod,
+                    source_type: saved.source_type || 'CHAT',
                     occurred_at_wib: formatWIBShort(saved.occurred_at),
                 };
             } else if (fnName === 'get_finances') {
                 const period = args.period || 'today';
                 const kindFilter = (args.kind || 'all').toLowerCase();
+                const categoryFilter = (args.category && typeof args.category === 'string') ? args.category.trim().toLowerCase() : null;
+                const orderByClause = args.order_by === 'largest' ? 'amount DESC, occurred_at DESC' : 'occurred_at DESC';
 
                 let dateCondition = `TRUE`;
                 let periodLabel = 'Hari Ini';
@@ -675,31 +768,44 @@ Gaya Bahasa:
                 }
 
                 let kindCondition = `TRUE`;
-                if (kindFilter === 'expense') kindCondition = `kind = 'expense'`;
-                if (kindFilter === 'income') kindCondition = `kind = 'income'`;
+                if (kindFilter === 'expense') kindCondition = `LOWER(kind) = 'expense'`;
+                if (kindFilter === 'income') kindCondition = `LOWER(kind) = 'income'`;
+
+                const summaryParams = [effectiveUserId, phoneTarget];
+                let summaryCategoryCond = `TRUE`;
+                if (categoryFilter) {
+                    summaryParams.push(categoryFilter);
+                    summaryCategoryCond = `LOWER(category) = $${summaryParams.length}`;
+                }
 
                 const summaryRes = await db.query(
                     `SELECT 
-                        COALESCE(SUM(CASE WHEN kind = 'expense' THEN amount ELSE 0 END), 0) AS total_expense,
-                        COALESCE(SUM(CASE WHEN kind = 'income' THEN amount ELSE 0 END), 0) AS total_income,
+                        COALESCE(SUM(CASE WHEN LOWER(kind) = 'expense' THEN amount ELSE 0 END), 0) AS total_expense,
+                        COALESCE(SUM(CASE WHEN LOWER(kind) = 'income' THEN amount ELSE 0 END), 0) AS total_income,
                         COUNT(*) AS total_count
                      FROM financial_transactions
                      WHERE (user_id = $1 OR user_id = $2)
                        AND deleted_at IS NULL
-                       AND ${dateCondition};`,
-                    [effectiveUserId, phoneTarget]
+                       AND ${dateCondition}
+                       AND ${summaryCategoryCond};`,
+                    summaryParams
                 );
 
+                const listParams = [...summaryParams];
+                listParams.push(args.limit || 10);
+                const limitIndex = listParams.length;
+
                 const listRes = await db.query(
-                    `SELECT id, kind, amount, category, description, occurred_at
+                    `SELECT id, kind, amount, category, description, payment_method, source_type, occurred_at
                      FROM financial_transactions
                      WHERE (user_id = $1 OR user_id = $2)
                        AND deleted_at IS NULL
                        AND ${dateCondition}
                        AND ${kindCondition}
-                     ORDER BY occurred_at DESC
-                     LIMIT $3;`,
-                    [effectiveUserId, phoneTarget, args.limit || 10]
+                       AND ${summaryCategoryCond}
+                     ORDER BY ${orderByClause}
+                     LIMIT $${limitIndex};`,
+                    listParams
                 );
 
                 const totalExpense = parseFloat(summaryRes.rows[0]?.total_expense || 0);
@@ -713,6 +819,8 @@ Gaya Bahasa:
                     formatted_amount: formatRupiah(t.amount),
                     category: t.category,
                     description: t.description,
+                    payment_method: t.payment_method || 'Cash',
+                    source_type: t.source_type || 'CHAT',
                     occurred_at_wib: formatWIBShort(t.occurred_at),
                 }));
 
@@ -721,6 +829,8 @@ Gaya Bahasa:
                 toolResponse = {
                     success: true,
                     period: periodLabel,
+                    category: categoryFilter,
+                    order_by: args.order_by || 'recent',
                     total_expense: totalExpense,
                     formatted_expense: formatRupiah(totalExpense),
                     total_income: totalIncome,
@@ -765,9 +875,12 @@ Gaya Bahasa:
                 if (!targetDate) throw new Error(`Format waktu pengingat "${args.remind_at}" tidak valid.`);
 
                 const normPrio = normalizePriority(args.priority);
+                const deliveryMode = ['CHAT', 'ALARM', 'CHAT_AND_ALARM'].includes(args.delivery_mode) ? args.delivery_mode : 'CHAT';
+                const targetChannels = Array.isArray(args.target_channels) && args.target_channels.length > 0 ? args.target_channels : null;
+
                 const insertRes = await db.query(
-                    `INSERT INTO reminders (user_id, channel_id, title, remind_at, priority, status, created_at)
-                     VALUES ($1, $2, $3, $4, $5, 'pending', NOW())
+                    `INSERT INTO reminders (user_id, channel_id, title, remind_at, priority, status, delivery_mode, target_channels, created_at)
+                     VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, NOW())
                      RETURNING *;`,
                     [
                         effectiveUserId,
@@ -775,12 +888,14 @@ Gaya Bahasa:
                         args.title,
                         targetDate.toISOString(),
                         normPrio,
+                        deliveryMode,
+                        targetChannels,
                     ]
                 );
 
                 const saved = insertRes.rows[0];
                 const formattedTime = formatWIBShort(saved.remind_at);
-                console.log(`⏰ [Direct Gemini] Berhasil membuat reminder #${saved.id}: "${saved.title}" pada ${formattedTime}`);
+                console.log(`⏰ [Direct Gemini] Berhasil membuat reminder #${saved.id}: "${saved.title}" [${saved.delivery_mode}] pada ${formattedTime}`);
 
                 toolResponse = {
                     success: true,
@@ -788,6 +903,8 @@ Gaya Bahasa:
                     title: saved.title,
                     remind_at_wib: formattedTime,
                     priority: saved.priority,
+                    delivery_mode: saved.delivery_mode,
+                    target_channels: saved.target_channels,
                 };
             } else if (fnName === 'get_reminders') {
                 const res = await db.query(
@@ -1159,12 +1276,21 @@ Gaya Bahasa:
             },
         };
 
-        const res2 = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(step2RequestBody),
-            signal: AbortSignal.timeout(20000),
-        });
+        let res2;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            res2 = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(step2RequestBody),
+                signal: AbortSignal.timeout(20000),
+            });
+            if (res2.status === 429 && attempt < 2) {
+                console.warn(`⚠️ [Direct Gemini] Rate limited on step 2 (429). Retrying attempt ${attempt + 1} after delay...`);
+                await new Promise((r) => setTimeout(r, 4000 * (attempt + 1)));
+                continue;
+            }
+            break;
+        }
 
         if (res2.ok) {
             const data2 = await res2.json();
@@ -1177,20 +1303,24 @@ Gaya Bahasa:
             if (fnName === 'record_transaction') {
                 const icon = toolResponse.kind === 'expense' ? '💸' : '💰';
                 const label = toolResponse.kind === 'expense' ? 'Pengeluaran' : 'Pemasukan';
-                return `${icon} Siap ${preferredGreeting}! Catatan ${label} sebesar *${toolResponse.formatted_amount}* untuk *"${toolResponse.description}"* sudah berhasil Amba catat ke database.`;
+                const via = toolResponse.payment_method ? ` via *${toolResponse.payment_method}*` : '';
+                return `${icon} Siap ${preferredGreeting}! Catatan ${label} sebesar *${toolResponse.formatted_amount}* untuk *"${toolResponse.description}"*${via} sudah berhasil dicatat ke database.`;
             }
             if (fnName === 'get_finances') {
-                let msg = `💰 *REKAP KEUANGAN [${toolResponse.period.toUpperCase()}]*\n`;
+                const catInfo = toolResponse.category ? ` (${toolResponse.category.toUpperCase()})` : '';
+                let msg = `💰 *REKAP KEUANGAN [${toolResponse.period.toUpperCase()}${catInfo}]*\n`;
                 msg += `• Total Pengeluaran : *${toolResponse.formatted_expense}*\n`;
                 msg += `• Total Pemasukan   : *${toolResponse.formatted_income}*\n`;
                 msg += `• Saldo Bersih      : *${toolResponse.formatted_net_balance}*\n\n`;
                 if (!toolResponse.transactions || toolResponse.transactions.length === 0) {
                     msg += `ℹ️ Belum ada catatan transaksi pada periode ini.`;
                 } else {
-                    msg += `*Rincian Transaksi:*\n`;
+                    const sortLabel = toolResponse.order_by === 'largest' ? 'Terbesar' : 'Terbaru';
+                    msg += `*Rincian Transaksi (${sortLabel}):*\n`;
                     toolResponse.transactions.forEach((t, i) => {
                         const ic = t.kind === 'expense' ? '🔴' : '🟢';
-                        msg += `${i + 1}. ${ic} *${t.formatted_amount}* — ${t.description} (\`${t.category}\`)\n`;
+                        const via = t.payment_method ? ` [${t.payment_method}]` : '';
+                        msg += `${i + 1}. ${ic} *${t.formatted_amount}* — ${t.description} (\`${t.category}\`${via})\n`;
                     });
                 }
                 return msg;
@@ -1283,4 +1413,4 @@ Gaya Bahasa:
     return reply;
 }
 
-module.exports = { generateDirectGeminiReply };
+module.exports = { generateDirectGeminiReply, TOOLS_DECLARATIONS };

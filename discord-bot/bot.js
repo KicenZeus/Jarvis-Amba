@@ -1,5 +1,7 @@
 require('dotenv').config();
 const http = require('http');
+const crypto = require('crypto');
+const expressApp = require('./app');
 const db = require('./db');
 const { Client, GatewayIntentBits, Partials, Events } = require('discord.js');
 const { downloadToBuffer, transcribeAudio, analyzeImage, generateTTS, cleanupAudio } = require('./voiceService');
@@ -108,9 +110,10 @@ const {
 
 const unregisteredDiscordGatekeepMap = new Map();
 
+const USE_N8N = (process.env.USE_N8N || 'false').toLowerCase() === 'true';
 const N8N_WEBHOOK_URL =
     process.env.N8N_WEBHOOK_URL || 'http://localhost:5678/webhook/jarvis-discord';
-const N8N_TIMEOUT_MS = parseInt(process.env.N8N_TIMEOUT_MS, 10) || 60000;
+const N8N_TIMEOUT_MS = parseInt(process.env.N8N_TIMEOUT_MS, 10) || 8000;
 const NOTIFY_PORT = parseInt(process.env.PORT || process.env.NOTIFY_PORT, 10) || 5001;
 const ALLOWED_USER_IDS = process.env.ALLOWED_USER_IDS
     ? process.env.ALLOWED_USER_IDS.split(',').map((id) => id.trim()).filter(Boolean)
@@ -1489,6 +1492,47 @@ async function processBotRequest(message, content, isVoiceInput, existingTypingI
         // Ambil role pengguna dari sistem keamanan (RBAC)
         const userRole = await security.getUserRole(message.author.id);
 
+        // Phase 0-A: Direct Gemini AI sebagai otak utama V3 jika USE_N8N dinonaktifkan (default)
+        if (!USE_N8N) {
+            try {
+                const directReply = await generateDirectGeminiReply({
+                    userMessage: finalContent,
+                    userId: message.author.id,
+                    channelId: message.channel.id,
+                    userName: greetingInfo ? greetingInfo.preferredName : message.author.username,
+                    callsign: greetingInfo ? greetingInfo.callsign : null,
+                    userRole: userRole,
+                    memories: userMemories,
+                });
+
+                await message.reply(directReply);
+
+                recordConversation(
+                    message.author.id,
+                    message.channel.id,
+                    isVoiceInput ? 'VOICE_NOTE' : 'TEXT',
+                    'text',
+                    finalContent,
+                    directReply,
+                    { channelName: message.channel.name || 'DM', engine: 'DIRECT_GEMINI' }
+                ).catch(() => {});
+
+                if (agentRunId) {
+                    finishAgentRun(agentRunId, 'COMPLETED', null, { replyMode: 'text', engine: 'DIRECT_GEMINI' }).catch(() => {});
+                }
+                return;
+            } catch (geminiErr) {
+                console.error('❌ [Discord] Direct Gemini AI gagal:', geminiErr.message);
+                if (agentRunId) {
+                    finishAgentRun(agentRunId, 'FAILED', geminiErr.message).catch(() => {});
+                }
+                await message.reply(`Waduh ${greetingInfo.preferredName}, koneksi ke otak AI gue lagi ada kendala nih. Coba lagi bentar ya!`).catch(() => {});
+                return;
+            } finally {
+                clearInterval(typingInterval);
+            }
+        }
+
         const payload = {
             schemaVersion: 1,
             source: 'discord',
@@ -1526,11 +1570,11 @@ async function processBotRequest(message, content, isVoiceInput, existingTypingI
             timestamp: new Date().toISOString(),
         };
 
-        // Bounded Retry Policy (Phase 8: Maksimal 2x retry dengan exponential backoff)
+        // Bounded Retry Policy (Phase 0-A: maxRetries = 0 saat memanggil n8n agar tidak hang >60s)
         const startAiTime = Date.now();
         let responseData = null;
         let attempt = 0;
-        const maxRetries = 2;
+        const maxRetries = 0;
         let backoffMs = 1500;
 
         while (attempt <= maxRetries) {
@@ -1866,6 +1910,47 @@ async function handleVoiceChannelAudio(userId, wavBuffer, guildId, textChannel =
     }
 }
 
+/**
+ * Verifikasi Shared Secret untuk Endpoint HTTP Legacy Port 5001 (Phase 0-A Security Hotfix)
+ * Menggunakan header 'x-internal-key' dan crypto.timingSafeEqual
+ */
+function verifyInternalKey(req, res) {
+    const internalKey = process.env.INTERNAL_API_KEY;
+    const enforce = (process.env.INTERNAL_KEY_ENFORCE || 'false').toLowerCase() === 'true';
+
+    if (!internalKey) {
+        if (enforce) {
+            console.error('❌ [Security] INTERNAL_API_KEY belum dikonfigurasi di server tetapi INTERNAL_KEY_ENFORCE=true.');
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Server misconfiguration: INTERNAL_API_KEY is not set' }));
+            return false;
+        }
+        return true;
+    }
+
+    const providedKey = req.headers ? (req.headers['x-internal-key'] || req.headers['X-Internal-Key']) : null;
+    if (!providedKey) {
+        if (enforce) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Unauthorized: Header x-internal-key diperlukan' }));
+            return false;
+        }
+        console.warn('⚠️ [Security] Header x-internal-key tidak ada pada request ke endpoint legacy (mode transisi).');
+        return true;
+    }
+
+    const expectedBuf = Buffer.from(String(internalKey), 'utf8');
+    const providedBuf = Buffer.from(String(providedKey), 'utf8');
+
+    if (expectedBuf.length !== providedBuf.length || !crypto.timingSafeEqual(expectedBuf, providedBuf)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Forbidden: Header x-internal-key tidak valid' }));
+        return false;
+    }
+
+    return true;
+}
+
 // Listener HTTP internal untuk notifikasi proaktif & Health Check (Phase 8)
 const notifyServer = http.createServer(async (req, res) => {
     // 1. Endpoint Health Check (Phase 8) & Uptime Pinger Keepalive
@@ -1884,6 +1969,7 @@ const notifyServer = http.createServer(async (req, res) => {
 
     // 2. Endpoint Notifikasi Proaktif (Reminder dari n8n Scheduler)
     if (req.method === 'POST' && req.url === '/api/notify') {
+        if (!verifyInternalKey(req, res)) return;
         let body = '';
         req.on('data', (chunk) => (body += chunk));
         req.on('end', async () => {
@@ -1930,6 +2016,7 @@ const notifyServer = http.createServer(async (req, res) => {
 
     // 3. Endpoint Broadcast Serentak (Multi-Channel Announcement - Instan & Terjadwal)
     if (req.url && (req.url.startsWith('/api/broadcast') || req.url.startsWith('/api/users'))) {
+        if (!verifyInternalKey(req, res)) return;
         // Ambil daftar seluruh user terdaftar & rolenya
         if (req.method === 'GET' && (req.url.startsWith('/api/users') || req.url.includes('users') || req.url.includes('recipients'))) {
             try {
@@ -2059,8 +2146,8 @@ const notifyServer = http.createServer(async (req, res) => {
         }
     }
 
-    res.writeHead(404);
-    res.end();
+    // 5. Delegasikan ke Express 5 (Modular API V3 /api/v1/*, Unified Web Gateway, & SPA Catch-All)
+    return expressApp(req, res);
 });
 
 notifyServer.listen(NOTIFY_PORT, '0.0.0.0', () => {

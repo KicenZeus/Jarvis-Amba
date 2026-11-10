@@ -1,11 +1,13 @@
 const db = require('./db');
 const { formatForWhatsApp } = require('./channelService');
 const { sendWhatsAppTextMessage } = require('./whatsappAdapter');
+const { evaluateSmartPresenceRouting } = require('./presenceService');
 
 /**
  * ==============================================================================
- * Jarvis V2.1 Phase 6: Proactive Messaging & Notification Preferences Service
- * Mengatur Smart Routing Notifikasi ke Discord, WhatsApp, atau Keduanya (BOTH)
+ * Jarvis V3 Phase 5: Notification Delivery Router (PRD V3 Sec 37 - 42)
+ * Smart Multi-Channel Notification Router (DISCORD, WHATSAPP, ANDROID, IOS, WEB)
+ * Aturan Jam Tenang Terintegrasi & Bypass Formula D1
  * ==============================================================================
  */
 
@@ -14,26 +16,33 @@ const EVENT_TYPES = {
     DAILY_BRIEFING: 'DAILY_BRIEFING',
     DAILY_RECAP: 'DAILY_RECAP',
     TASK_DUE: 'TASK_DUE',
+    FINANCE_ALERT: 'FINANCE_ALERT',
+    APPROVAL_REQUEST: 'APPROVAL_REQUEST',
+    SYSTEM_ALERT: 'SYSTEM_ALERT',
 };
 
 const CHANNELS = {
     DISCORD: 'DISCORD',
     WHATSAPP: 'WHATSAPP',
+    ANDROID: 'ANDROID',
+    IOS: 'IOS',
+    WEB: 'WEB',
     BOTH: 'BOTH',
 };
 
 /**
- * Memeriksa apakah waktu saat ini berada di dalam rentang Jam Tenang (Quiet Hours)
+ * Memeriksa apakah waktu tertentu berada di dalam rentang Jam Tenang (Quiet Hours)
  * @param {string|null} startTimeStr - Format "HH:mm" atau "HH:mm:ss"
  * @param {string|null} endTimeStr - Format "HH:mm" atau "HH:mm:ss"
  * @param {string} timeZone - Zona waktu (default: 'Asia/Jakarta')
+ * @param {Date|null} checkDate - Objek waktu untuk pengujian (opsional, default: sekarang)
  * @returns {boolean}
  */
-function isQuietHours(startTimeStr, endTimeStr, timeZone = 'Asia/Jakarta') {
+function isQuietHours(startTimeStr, endTimeStr, timeZone = 'Asia/Jakarta', checkDate = null) {
     if (!startTimeStr || !endTimeStr) return false;
 
     try {
-        const now = new Date();
+        const now = checkDate instanceof Date ? checkDate : new Date();
         const formatter = new Intl.DateTimeFormat('en-GB', {
             timeZone,
             hour: '2-digit',
@@ -55,11 +64,44 @@ function isQuietHours(startTimeStr, endTimeStr, timeZone = 'Asia/Jakarta') {
             // Rentang waktu di hari yang sama (misal 13:00 - 15:00)
             return currentMin >= startMin && currentMin < endMin;
         } else {
-            // Rentang waktu melewati tengah malam (misal 22:00 - 07:00)
+            // Rentang waktu melewati tengah malam (misal 22:00 - 06:00)
             return currentMin >= startMin || currentMin < endMin;
         }
     } catch (e) {
         return false;
+    }
+}
+
+/**
+ * Mengambil jam tenang efektif untuk pengguna (dengan fallback default V2: 22:00 - 06:00)
+ */
+async function getUserQuietHours(userId, eventType = null) {
+    if (!userId) return { start: '22:00', end: '06:00' };
+    try {
+        let res;
+        if (eventType) {
+            res = await db.query(
+                `SELECT quiet_hours_start, quiet_hours_end 
+                 FROM notification_preferences 
+                 WHERE user_id = $1 AND event_type = $2 LIMIT 1;`,
+                [userId, String(eventType).toUpperCase()]
+            );
+        }
+        if (!res || res.rows.length === 0 || (!res.rows[0].quiet_hours_start && !res.rows[0].quiet_hours_end)) {
+            res = await db.query(
+                `SELECT quiet_hours_start, quiet_hours_end 
+                 FROM notification_preferences 
+                 WHERE user_id = $1 AND (quiet_hours_start IS NOT NULL OR quiet_hours_end IS NOT NULL)
+                 ORDER BY updated_at DESC LIMIT 1;`,
+                [userId]
+            );
+        }
+        const row = res?.rows[0];
+        const startStr = row?.quiet_hours_start ? String(row.quiet_hours_start).substring(0, 5) : '22:00';
+        const endStr = row?.quiet_hours_end ? String(row.quiet_hours_end).substring(0, 5) : '06:00';
+        return { start: startStr, end: endStr };
+    } catch (_) {
+        return { start: '22:00', end: '06:00' };
     }
 }
 
@@ -132,9 +174,9 @@ async function setNotificationPreference(
 /**
  * Smart Routing: Menentukan target channel dan nomor/ID tujuan pengiriman notifikasi
  * @param {string} userId - ID internal pengguna
- * @param {string} eventType - 'REMINDER' | 'DAILY_BRIEFING' | 'DAILY_RECAP' | 'TASK_DUE'
- * @param {object} context - { channelId, preferredChannel }
- * @returns {Promise<{ shouldSend: boolean, reason?: string, targets: Array<{ channel: string, destination: string }> }>}
+ * @param {string} eventType - Notification Type (REMINDER, DAILY_BRIEFING, DAILY_RECAP, TASK_DUE, FINANCE_ALERT, APPROVAL_REQUEST, SYSTEM_ALERT)
+ * @param {object} context - { channelId, preferredChannel, target_channels, priority, bypassQuietHours, now }
+ * @returns {Promise<{ shouldSend: boolean, reason?: string, targets: Array<{ channel: string, destination: string, deviceId?: number }>, quietHours?: boolean, quietHoursWindow?: object }>}
  */
 async function resolveNotificationDestinations(userId, eventType, context = {}) {
     if (!userId) {
@@ -157,23 +199,41 @@ async function resolveNotificationDestinations(userId, eventType, context = {}) 
             return { shouldSend: false, reason: 'DISABLED_BY_USER', targets: [] };
         }
 
-        // 2. Cek Jam Tenang (Quiet Hours)
+        // 2. Cek Jam Tenang (Quiet Hours) - PRD Sec 39 & Keputusan Final D1
         // PENGINGAT (REMINDER) yang diminta user secara eksplisit dan notifikasi prioritas tinggi tidak boleh di-drop oleh Jam Tenang
         const isExemptFromQuietHours = 
-            context.bypassQuietHours || 
+            Boolean(context.bypassQuietHours) || 
             eventType === 'REMINDER' || 
-            String(context.priority || '').toUpperCase() === 'URGENT' || 
-            String(context.priority || '').toUpperCase() === 'HIGH';
+            ['URGENT', 'HIGH'].includes(String(context.priority || '').toUpperCase());
 
-        if (!isExemptFromQuietHours && pref && isQuietHours(pref.quiet_hours_start, pref.quiet_hours_end)) {
-            console.log(`🌙 [NotificationService] Notifikasi ${eventType} diabaikan/ditunda karena Jam Tenang (${pref.quiet_hours_start} - ${pref.quiet_hours_end}) untuk user ${userId}`);
-            return { shouldSend: false, reason: 'QUIET_HOURS', targets: [] };
+        const qHours = await getUserQuietHours(userId, eventType);
+        const inQuietHours = isQuietHours(qHours.start, qHours.end, 'Asia/Jakarta', context.now || null);
+
+        if (!isExemptFromQuietHours && inQuietHours) {
+            console.log(`🌙 [NotificationService] Notifikasi ${eventType} ditunda karena Jam Tenang (${qHours.start} - ${qHours.end}) untuk user ${userId}`);
+            return { 
+                shouldSend: false, 
+                reason: 'QUIET_HOURS', 
+                targets: [], 
+                quietHours: true,
+                quietHoursWindow: qHours 
+            };
         }
 
-        // Tentukan channelType: Dari preferensi user jika ada, atau default pintar
-        let channelType = pref ? pref.channel_type : (context.preferredChannel || 'BOTH');
+        // 3. Tentukan saluran target (PRD Sec 40 - Multi-Channel Targets)
+        // Eksplisit target_channels menang jika disediakan
+        let targetChannelTypes = [];
+        if (Array.isArray(context.target_channels) && context.target_channels.length > 0) {
+            targetChannelTypes = context.target_channels.map(c => String(c).toUpperCase().trim());
+        } else if (pref && pref.channel_type) {
+            targetChannelTypes = pref.channel_type === 'BOTH' ? ['DISCORD', 'WHATSAPP'] : [pref.channel_type];
+        } else if (context.preferredChannel) {
+            targetChannelTypes = context.preferredChannel === 'BOTH' ? ['DISCORD', 'WHATSAPP'] : [context.preferredChannel];
+        } else {
+            targetChannelTypes = ['DISCORD', 'WHATSAPP'];
+        }
 
-        // 3. Ambil data channel eksternal yang tertaut dengan user
+        // 4. Ambil data channel eksternal yang tertaut dengan user
         const channelsRes = await db.query(
             `SELECT channel_type, external_user_id, phone_number, is_primary
              FROM user_channels
@@ -186,21 +246,26 @@ async function resolveNotificationDestinations(userId, eventType, context = {}) 
         const waChannel = userChannels.find((c) => c.channel_type === 'WHATSAPP');
 
         // Jika user hanya punya akun WhatsApp (misal user mendaftar lewat WA)
-        if (!discordChannel && waChannel) {
-            channelType = 'WHATSAPP';
+        if (!discordChannel && waChannel && targetChannelTypes.includes('DISCORD') && !targetChannelTypes.includes('WHATSAPP')) {
+            targetChannelTypes.push('WHATSAPP');
         }
         // Jika user hanya punya Discord
-        if (discordChannel && !waChannel && channelType === 'BOTH') {
-            channelType = 'DISCORD';
+        if (discordChannel && !waChannel && targetChannelTypes.includes('WHATSAPP') && !targetChannelTypes.includes('DISCORD')) {
+            targetChannelTypes.push('DISCORD');
         }
+
+        // 4.b Evaluasi Smart Presence Routing (Phase 9 - PRD Sec 67 & 68)
+        // Hindari spam notifikasi ke WhatsApp / Discord saat pengguna sedang aktif di Web Dashboard
+        const presenceEvaluation = await evaluateSmartPresenceRouting(userId, eventType, targetChannelTypes, context);
+        targetChannelTypes = presenceEvaluation.finalChannels;
 
         const targets = [];
 
         // Resolusi Target DISCORD
-        if (channelType === 'DISCORD' || channelType === 'BOTH') {
-            const discordDest = context.channelId && !String(context.channelId).startsWith('wa_')
+        if (targetChannelTypes.includes('DISCORD')) {
+            const discordDest = context.channelId && !String(context.channelId).startsWith('wa_') && /^\d{17,20}$/.test(String(context.channelId))
                 ? context.channelId
-                : (discordChannel?.external_user_id || null);
+                : (discordChannel?.external_user_id || (/^\d{17,20}$/.test(String(userId)) ? userId : null));
 
             if (discordDest) {
                 targets.push({
@@ -213,20 +278,14 @@ async function resolveNotificationDestinations(userId, eventType, context = {}) 
 
         // Resolusi Target WHATSAPP
         const isWhatsAppOrigin = context.channelId && String(context.channelId).startsWith('wa_');
-        if (channelType === 'WHATSAPP' || channelType === 'BOTH' || isWhatsAppOrigin) {
-            let waPhone = waChannel?.phone_number || waChannel?.external_user_id;
+        if (targetChannelTypes.includes('WHATSAPP') || isWhatsAppOrigin) {
+            let waPhone = waChannel?.phone_number || waChannel?.external_user_id || context.phone || context.destination;
 
-            // Jika context membawa channelId WhatsApp (wa_628xxx)
             if (!waPhone && isWhatsAppOrigin) {
                 waPhone = String(context.channelId).replace(/^wa_/, '');
             }
-            // Jika userId berawalan wa_
             if (!waPhone && String(userId).startsWith('wa_')) {
                 waPhone = String(userId).replace(/^wa_/, '');
-            }
-            // Fallback langsung dari context.channelId jika masih kosong
-            if (!waPhone && isWhatsAppOrigin) {
-                waPhone = String(context.channelId).replace(/^wa_/, '');
             }
 
             if (waPhone && !targets.some((t) => t.channel === 'WHATSAPP' && t.destination === waPhone)) {
@@ -234,10 +293,52 @@ async function resolveNotificationDestinations(userId, eventType, context = {}) 
                     channel: 'WHATSAPP',
                     destination: waPhone,
                 });
+            } else if (!waPhone && targetChannelTypes.includes('WHATSAPP')) {
+                // Jika user meminta eksplisit target WHATSAPP tetapi belum ada nomor tertaut
+                targets.push({
+                    channel: 'WHATSAPP',
+                    destination: 'unlinked_whatsapp',
+                });
             }
         }
 
-        // Jika channelType adalah BOTH atau spesifik tetapi tidak ada target yang cocok, fallback ke context
+        // Resolusi Target ANDROID (Mobile App Push)
+        if (targetChannelTypes.includes('ANDROID')) {
+            try {
+                const devRes = await db.query(
+                    `SELECT id, device_identifier, push_token 
+                     FROM user_devices 
+                     WHERE user_id = $1 AND platform = 'android' AND status = 'ACTIVE' 
+                     ORDER BY last_seen_at DESC LIMIT 1;`,
+                    [userId]
+                );
+                if (devRes.rows.length > 0) {
+                    targets.push({
+                        channel: 'ANDROID',
+                        destination: devRes.rows[0].push_token || 'fcm_silent',
+                        deviceId: devRes.rows[0].id,
+                    });
+                } else {
+                    targets.push({
+                        channel: 'ANDROID',
+                        destination: 'android_generic',
+                        deviceId: null,
+                    });
+                }
+            } catch (_) {
+                targets.push({ channel: 'ANDROID', destination: 'android_generic', deviceId: null });
+            }
+        }
+
+        // Resolusi Target WEB (Dashboard Realtime / Alerts)
+        if (targetChannelTypes.includes('WEB')) {
+            targets.push({
+                channel: 'WEB',
+                destination: userId,
+            });
+        }
+
+        // Fallback jika belum ada target cocok tetapi ada context.channelId
         if (targets.length === 0 && context.channelId) {
             if (String(context.channelId).startsWith('wa_')) {
                 targets.push({ channel: 'WHATSAPP', destination: String(context.channelId).replace(/^wa_/, '') });
@@ -249,8 +350,11 @@ async function resolveNotificationDestinations(userId, eventType, context = {}) 
         return {
             shouldSend: targets.length > 0,
             targets,
-            channelType,
+            channelTypes: targetChannelTypes,
             quietHours: false,
+            presenceRouted: Boolean(presenceEvaluation?.presenceRouted),
+            suppressedChannels: presenceEvaluation?.suppressedChannels || [],
+            activePlatform: presenceEvaluation?.activePlatform || null,
         };
     } catch (err) {
         console.error('❌ [NotificationService] Error pada smart routing destinations:', err.message);
@@ -262,16 +366,16 @@ async function resolveNotificationDestinations(userId, eventType, context = {}) 
  * Mengirim notifikasi proaktif ke semua target channel yang telah di-resolve
  * @param {object} params
  * @param {string} params.userId - ID internal pengguna
- * @param {string} params.eventType - 'REMINDER' | 'DAILY_BRIEFING' | 'DAILY_RECAP' | 'TASK_DUE'
+ * @param {string} params.eventType - 'REMINDER' | 'DAILY_BRIEFING' | 'DAILY_RECAP' | 'TASK_DUE' | 'FINANCE_ALERT' | 'APPROVAL_REQUEST' | 'SYSTEM_ALERT'
  * @param {string} params.text - Pesan notifikasi
- * @param {object} [params.context] - { channelId, reminderId }
+ * @param {object} [params.context] - { channelId, reminderId, target_channels, priority, bypassQuietHours, now }
  * @param {object} [params.discordClient] - Discord Client instance
  * @returns {Promise<{ success: boolean, results: Array }>}
  */
 async function sendSmartNotification({ userId, eventType, text, context = {}, discordClient = null }) {
     const route = await resolveNotificationDestinations(userId, eventType, context);
     if (!route.shouldSend) {
-        return { success: false, reason: route.reason, results: [] };
+        return { success: false, reason: route.reason, results: [], quietHours: Boolean(route.quietHours) };
     }
 
     const results = [];
@@ -320,6 +424,30 @@ async function sendSmartNotification({ userId, eventType, text, context = {}, di
             } catch (dcErr) {
                 results.push({ channel: 'DISCORD', success: false, error: dcErr.message });
             }
+        } else if (target.channel === 'ANDROID') {
+            try {
+                await db.query(
+                    `INSERT INTO proactive_logs (user_id, type, channel_id, content, status) 
+                     VALUES ($1, $2, 'ANDROID', $3, 'SENT');`,
+                    [userId, eventType, text]
+                ).catch(() => {});
+                results.push({ channel: 'ANDROID', success: true, destination: target.destination, deviceId: target.deviceId });
+                console.log(`📤 [SmartNotif] Notifikasi [${eventType}] terkirim ke Android (${target.destination || 'device'})`);
+            } catch (androErr) {
+                results.push({ channel: 'ANDROID', success: false, error: androErr.message });
+            }
+        } else if (target.channel === 'WEB') {
+            try {
+                await db.query(
+                    `INSERT INTO proactive_logs (user_id, type, channel_id, content, status) 
+                     VALUES ($1, $2, 'WEB', $3, 'SENT');`,
+                    [userId, eventType, text]
+                ).catch(() => {});
+                results.push({ channel: 'WEB', success: true, destination: target.destination });
+                console.log(`📤 [SmartNotif] Notifikasi [${eventType}] terkirim ke Web Dashboard (${userId})`);
+            } catch (webErr) {
+                results.push({ channel: 'WEB', success: false, error: webErr.message });
+            }
         }
     }
 
@@ -333,6 +461,7 @@ module.exports = {
     EVENT_TYPES,
     CHANNELS,
     isQuietHours,
+    getUserQuietHours,
     getUserNotificationPreferences,
     setNotificationPreference,
     resolveNotificationDestinations,

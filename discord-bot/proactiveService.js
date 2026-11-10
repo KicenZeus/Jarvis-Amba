@@ -427,50 +427,13 @@ async function checkAndSendProactiveMessages(client = null) {
             }
         }
 
-        // 3. CHECK DUE REMINDERS (Regular & Snoozed yang jatuh tempo)
-        const dueReminders = await db.query(
-            `UPDATE reminders 
-             SET status = 'sent', sent_at = NOW(), snooze_until = NULL, last_triggered_at = NOW()
-             WHERE id IN (
-                 SELECT id FROM reminders 
-                 WHERE status = 'pending' AND (
-                     (snooze_until IS NOT NULL AND snooze_until <= NOW())
-                     OR (snooze_until IS NULL AND remind_at <= NOW())
-                 )
-                 FOR UPDATE SKIP LOCKED
-             )
-             RETURNING id, user_id, channel_id, title, priority, repeat_rule;`
-        );
-
-        for (const r of dueReminders.rows) {
-            const badge = formatPriorityBadge(r.priority);
-            const text = `⏰ *[PENGINGAT]* ${badge}\n${r.title}`;
-            const smartRes = await sendSmartNotification({
-                userId: r.user_id,
-                eventType: 'REMINDER',
-                text: text,
-                context: { channelId: r.channel_id, reminderId: r.id, priority: r.priority, bypassQuietHours: true },
-                discordClient: client,
-            });
-
-            if (smartRes.success) {
-                console.log(`⏰ Pengingat #${r.id} berhasil terpicu & dikirim ke user ${r.user_id}`);
-            } else {
-                console.log(`ℹ️ [Notification] Pengingat #${r.id} tidak terkirim: ${smartRes.reason}`);
-                // Jika gagal bukan karena dinonaktifkan sengaja, reschedule 1 menit lagi agar alarm tidak hilang
-                if (smartRes.reason !== 'DISABLED_BY_USER') {
-                    await db.query(
-                        `UPDATE reminders SET status = 'pending', snooze_until = NOW() + INTERVAL '1 minute', sent_at = NULL WHERE id = $1`,
-                        [r.id]
-                    ).catch(() => {});
-                }
-            }
-
-            if (r.repeat_rule && smartRes.success) {
-                handleRecurringReminder(r.id).catch((err) =>
-                    console.error('⚠️ Gagal menjadwalkan recurring reminder:', err.message)
-                );
-            }
+        // 3. CHECK DUE REMINDERS (Unified Reminder & Alarm Engine V3 - PRD Sec 26 - 36)
+        try {
+            const reminderEngine = require('./reminderEngine');
+            await reminderEngine.processDueReminders(client);
+            await reminderEngine.recoverStaleLocks();
+        } catch (remErr) {
+            console.error('⚠️ Error saat memproses reminder via reminderEngine:', remErr.message);
         }
 
         // 4. CHECK & PROCESS SCHEDULED BROADCASTS (Phase 9)

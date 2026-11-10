@@ -204,11 +204,23 @@ async function getUserRole(userId, forceFresh = false) {
     }
 
     try {
-        // 2. Cek developer/creator ID bawaan (kicenzeus)
+        // 2. Cek konfigurasi Owner terverifikasi (ID murni via ENV / ID developer terdaftar)
+        // PERINGATAN KEAMANAN: DILARANG KERAS memeriksa display_name / nickname untuk penetapan role OWNER!
+        const ownerEnvIds = (process.env.OWNER_USER_IDS || process.env.OWNER_DISCORD_ID || process.env.OWNER_USER_ID || '')
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean);
+
         const isKnownDeveloper =
+            ownerEnvIds.includes(String(userId)) ||
             userId === '713137141072396370' ||
             userId === '344840856006459392' ||
             userId === '6288991185737';
+
+        if (isKnownDeveloper) {
+            roleCache.set(userId, { role: ROLES.OWNER.name, expiresAt: Date.now() + CACHE_TTL_MS });
+            return ROLES.OWNER;
+        }
 
         // 3. Query role secara paralel dari user_roles, users, dan user_channels
         const [rRes, uRes, cRes] = await Promise.all([
@@ -220,14 +232,11 @@ async function getUserRole(userId, forceFresh = false) {
         const rRole = (rRes.rows[0]?.role || '').toUpperCase();
         const uRole = (uRes.rows[0]?.role || '').toUpperCase();
         const cRole = (cRes.rows[0]?.role || '').toUpperCase();
-        const displayName = uRes.rows[0]?.display_name || cRes.rows[0]?.display_name || '';
 
         // Tentukan kandidat role dengan prioritas hierarki
         let resolvedRoleName = null;
 
-        if (isKnownDeveloper || /kicenzeus/i.test(displayName)) {
-            resolvedRoleName = 'OWNER';
-        } else if (rRole === 'OWNER' || uRole === 'OWNER' || cRole === 'OWNER') {
+        if (rRole === 'OWNER' || uRole === 'OWNER' || cRole === 'OWNER') {
             resolvedRoleName = 'OWNER';
         } else if (rRole === 'ADMIN' || uRole === 'ADMIN' || cRole === 'ADMIN') {
             resolvedRoleName = 'ADMIN';
@@ -247,9 +256,8 @@ async function getUserRole(userId, forceFresh = false) {
         }
 
         // 4. Fallback jika belum terdaftar di DB:
-        // Cek environment OWNER_DISCORD_ID / OWNER_USER_ID
-        const envOwner = process.env.OWNER_DISCORD_ID || process.env.OWNER_USER_ID;
-        if (envOwner && envOwner.trim() === userId) {
+        // Cek environment OWNER_USER_IDS / OWNER_DISCORD_ID / OWNER_USER_ID
+        if (ownerEnvIds.includes(String(userId))) {
             await setUserRole(userId, 'OWNER', 'SYSTEM_ENV', 'Configured as OWNER via ENV');
             return ROLES.OWNER;
         }

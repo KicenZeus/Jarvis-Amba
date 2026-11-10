@@ -1,4 +1,16 @@
 const readline = require('readline');
+try { require('dotenv').config(); } catch (_) {}
+try { require('dotenv').config({ path: require('path').join(__dirname, '../discord-bot/.env') }); } catch (_) {}
+
+const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || '';
+
+function getAuthHeaders(extra = {}) {
+    return {
+        'Content-Type': 'application/json',
+        ...(INTERNAL_API_KEY ? { 'x-internal-key': INTERNAL_API_KEY } : {}),
+        ...extra,
+    };
+}
 
 /**
  * ==============================================================================
@@ -39,7 +51,7 @@ async function resolveActiveServer() {
             const timeoutId = setTimeout(() => controller.abort(), 4000);
             const res = await fetch(`${baseUrl}/api/users`, {
                 method: 'GET',
-                headers: { 'Content-Type': 'application/json' },
+                headers: getAuthHeaders(),
                 signal: controller.signal,
             });
             clearTimeout(timeoutId);
@@ -81,7 +93,7 @@ async function sendBroadcast({ message, target = 'ALL', schedule = null, role = 
 
         const res = await fetch(apiUrl, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getAuthHeaders(),
             body: JSON.stringify(payload),
         });
 
@@ -144,7 +156,7 @@ async function listSchedules() {
     try {
         const res = await fetch(apiUrl, {
             method: 'GET',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getAuthHeaders(),
         });
 
         const data = await res.json().catch(() => null);
@@ -188,7 +200,7 @@ async function cancelSchedule(broadcastId) {
     try {
         const res = await fetch(apiUrl, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getAuthHeaders(),
             body: JSON.stringify({
                 action: 'cancel',
                 broadcastId,
@@ -218,7 +230,7 @@ async function kickUser(identifier) {
     try {
         const res = await fetch(apiUrl, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getAuthHeaders(),
             body: JSON.stringify({
                 action: 'kick',
                 identifier,

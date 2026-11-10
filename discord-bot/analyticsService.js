@@ -443,6 +443,315 @@ async function syncDailyMetrics(userId, targetDate = new Date()) {
     }
 }
 
+/**
+ * Mengambil analitik komprehensif dashboard untuk personal dashboard V3 (PRD Sec 69 - 73)
+ * @param {string} userId
+ * @param {object} [options] - { period: '7d' | '30d' | 'month' }
+ */
+async function getDashboardAnalytics(userId, options = {}) {
+    const period = options.period || '30d';
+    let intervalSql = "NOW() - INTERVAL '30 days'";
+    let daysCount = 30;
+    let label = '30 Hari Terakhir';
+
+    if (period === '7d' || period === '7_days') {
+        intervalSql = "NOW() - INTERVAL '7 days'";
+        daysCount = 7;
+        label = '7 Hari Terakhir';
+    } else if (period === 'month' || period === 'this_month') {
+        intervalSql = "DATE_TRUNC('month', CURRENT_DATE)";
+        daysCount = new Date().getDate();
+        label = 'Bulan Ini';
+    }
+
+    // 1. SECTION: TODAY (PRD Sec 70)
+    const todayRes = await db.query(`
+        SELECT
+            COALESCE(SUM(CASE WHEN LOWER(kind) = 'expense' THEN amount ELSE 0 END), 0) AS today_expense,
+            COALESCE(SUM(CASE WHEN LOWER(kind) = 'income' THEN amount ELSE 0 END), 0) AS today_income
+        FROM financial_transactions
+        WHERE user_id = $1 
+          AND deleted_at IS NULL
+          AND COALESCE(occurred_at, created_at) >= CURRENT_DATE;
+    `, [userId]);
+
+    const nextSchedRes = await db.query(`
+        SELECT id, title, start_time, end_time, status
+        FROM schedules
+        WHERE user_id = $1 
+          AND start_time >= NOW()
+          AND start_time < CURRENT_DATE + INTERVAL '1 day'
+          AND status != 'cancelled'
+        ORDER BY start_time ASC
+        LIMIT 1;
+    `, [userId]);
+
+    const nextRemRes = await db.query(`
+        SELECT id, title, remind_at, delivery_mode, status
+        FROM reminders
+        WHERE user_id = $1
+          AND status = 'pending'
+          AND remind_at >= NOW()
+        ORDER BY remind_at ASC
+        LIMIT 1;
+    `, [userId]);
+
+    // 2. SECTION: FINANCE (PRD Sec 70 & 71)
+    const totalsRes = await db.query(`
+        SELECT
+            COALESCE(SUM(CASE WHEN LOWER(kind) = 'expense' THEN amount ELSE 0 END), 0) AS period_expense,
+            COALESCE(SUM(CASE WHEN LOWER(kind) = 'income' THEN amount ELSE 0 END), 0) AS period_income,
+            COUNT(*) AS total_transactions
+        FROM financial_transactions
+        WHERE user_id = $1 
+          AND deleted_at IS NULL
+          AND COALESCE(occurred_at, created_at) >= ${intervalSql};
+    `, [userId]);
+
+    const totalExpense = parseFloat(totalsRes.rows[0]?.period_expense || 0);
+    const totalIncome = parseFloat(totalsRes.rows[0]?.period_income || 0);
+    const totalTransactions = parseInt(totalsRes.rows[0]?.total_transactions || 0, 10);
+
+    // Cashflow daily trends
+    const cashflowRes = await db.query(`
+        SELECT 
+            TO_CHAR(COALESCE(occurred_at, created_at)::date, 'YYYY-MM-DD') AS date_str,
+            COALESCE(SUM(CASE WHEN LOWER(kind) = 'expense' THEN amount ELSE 0 END), 0) AS expense,
+            COALESCE(SUM(CASE WHEN LOWER(kind) = 'income' THEN amount ELSE 0 END), 0) AS income
+        FROM financial_transactions
+        WHERE user_id = $1 
+          AND deleted_at IS NULL
+          AND COALESCE(occurred_at, created_at) >= ${intervalSql}
+        GROUP BY TO_CHAR(COALESCE(occurred_at, created_at)::date, 'YYYY-MM-DD')
+        ORDER BY date_str ASC;
+    `, [userId]);
+
+    const cashflow = cashflowRes.rows.map(r => ({
+        date: r.date_str,
+        expense: parseFloat(r.expense),
+        income: parseFloat(r.income),
+        net: parseFloat(r.income) - parseFloat(r.expense),
+    }));
+
+    // Categories Breakdown
+    const catRes = await db.query(`
+        SELECT 
+            COALESCE(category, 'Lain-lain') AS category,
+            SUM(amount) AS total,
+            COUNT(*) AS count
+        FROM financial_transactions
+        WHERE user_id = $1 
+          AND deleted_at IS NULL
+          AND LOWER(kind) = 'expense'
+          AND COALESCE(occurred_at, created_at) >= ${intervalSql}
+        GROUP BY COALESCE(category, 'Lain-lain')
+        ORDER BY total DESC;
+    `, [userId]);
+
+    const categories = catRes.rows.map(r => {
+        const total = parseFloat(r.total);
+        const percentage = totalExpense > 0 ? Math.round((total / totalExpense) * 100) : 0;
+        return {
+            category: r.category,
+            total,
+            count: parseInt(r.count, 10),
+            percentage,
+        };
+    });
+
+    // Payment Methods Breakdown (BCA, Mandiri, Cash, GoPay)
+    const methodRes = await db.query(`
+        SELECT 
+            COALESCE(payment_method, 'Cash') AS method,
+            SUM(amount) AS total,
+            COUNT(*) AS count
+        FROM financial_transactions
+        WHERE user_id = $1 
+          AND deleted_at IS NULL
+          AND COALESCE(occurred_at, created_at) >= ${intervalSql}
+        GROUP BY COALESCE(payment_method, 'Cash')
+        ORDER BY total DESC;
+    `, [userId]);
+
+    const paymentMethods = methodRes.rows.map(r => {
+        const total = parseFloat(r.total);
+        const overall = totalExpense + totalIncome;
+        const percentage = overall > 0 ? Math.round((total / overall) * 100) : 0;
+        return {
+            method: r.method,
+            total,
+            count: parseInt(r.count, 10),
+            percentage,
+        };
+    });
+
+    // Source Type Breakdown (CHAT, MANUAL, BANK_NOTIFICATION)
+    const sourceRes = await db.query(`
+        SELECT 
+            COALESCE(source_type, 'CHAT') AS source_type,
+            COUNT(*) AS count,
+            COALESCE(SUM(amount), 0) AS total
+        FROM financial_transactions
+        WHERE user_id = $1 
+          AND deleted_at IS NULL
+          AND COALESCE(occurred_at, created_at) >= ${intervalSql}
+        GROUP BY COALESCE(source_type, 'CHAT')
+        ORDER BY count DESC;
+    `, [userId]);
+
+    const sourceTypes = sourceRes.rows.map(r => ({
+        source_type: r.source_type,
+        count: parseInt(r.count, 10),
+        total: parseFloat(r.total),
+    }));
+
+    // Largest Expenses
+    const largestRes = await db.query(`
+        SELECT id, amount, description, category, payment_method, source_type, occurred_at
+        FROM financial_transactions
+        WHERE user_id = $1 
+          AND deleted_at IS NULL
+          AND LOWER(kind) = 'expense'
+          AND COALESCE(occurred_at, created_at) >= ${intervalSql}
+        ORDER BY amount DESC
+        LIMIT 5;
+    `, [userId]);
+
+    const largestExpenses = largestRes.rows.map(r => ({
+        id: r.id,
+        amount: parseFloat(r.amount),
+        description: r.description || '-',
+        notes: r.description || '-',
+        category: r.category || 'Lain-lain',
+        payment_method: r.payment_method || 'Cash',
+        source_type: r.source_type || 'CHAT',
+        occurred_at: r.occurred_at,
+    }));
+
+    // 3. SECTION: PRODUCTIVITY (PRD Sec 70)
+    const taskRes = await db.query(`
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'completed') AS tasks_completed,
+            COUNT(*) FILTER (WHERE status NOT IN ('completed', 'cancelled')) AS tasks_pending,
+            COUNT(*) AS tasks_total
+        FROM tasks
+        WHERE user_id = $1
+          AND deleted_at IS NULL
+          AND created_at >= ${intervalSql};
+    `, [userId]);
+
+    const tasksCompleted = parseInt(taskRes.rows[0]?.tasks_completed || 0, 10);
+    const tasksPending = parseInt(taskRes.rows[0]?.tasks_pending || 0, 10);
+    const tasksTotal = parseInt(taskRes.rows[0]?.tasks_total || 0, 10);
+    const completionRate = tasksTotal > 0 ? Math.round((tasksCompleted / tasksTotal) * 100) : 0;
+    const avgTasksPerDay = daysCount > 0 ? parseFloat((tasksCompleted / daysCount).toFixed(1)) : 0;
+
+    const remRes = await db.query(`
+        SELECT
+            COUNT(*) AS reminders_total,
+            COUNT(*) FILTER (WHERE snooze_until IS NOT NULL) AS reminders_snoozed
+        FROM reminders
+        WHERE user_id = $1
+          AND created_at >= ${intervalSql};
+    `, [userId]);
+
+    const remindersTotal = parseInt(remRes.rows[0]?.reminders_total || 0, 10);
+    const remindersSnoozed = parseInt(remRes.rows[0]?.reminders_snoozed || 0, 10);
+    const remindersSnoozedRatio = remindersTotal > 0 ? Math.round((remindersSnoozed / remindersTotal) * 100) : 0;
+
+    // 4. SECTION: JARVIS HEALTH (PRD Sec 70)
+    const jarvisHealth = {
+        serverStatus: 'ONLINE',
+        uptimeSeconds: Math.floor(process.uptime()),
+        version: '3.1.0',
+        environment: process.env.NODE_ENV || 'production',
+        dbPool: {
+            total: db.pool?.totalCount || 1,
+            idle: db.pool?.idleCount || 1,
+            waiting: db.pool?.waitingCount || 0,
+        },
+        geminiDirect: 'CONNECTED',
+    };
+
+    // 5. SECTION: AUTOMATED INSIGHTS (PRD Sec 72)
+    const insights = [];
+    if (categories.length > 0 && totalExpense > 0) {
+        insights.push({
+            type: 'FINANCE_TOP_CATEGORY',
+            title: `Kategori Terbesar: ${categories[0].category}`,
+            message: `Pengeluaran terbesar ${label.toLowerCase()} adalah ${categories[0].category} sebesar Rp ${Number(categories[0].total).toLocaleString('id-ID')} (${categories[0].percentage}% dari total).`,
+            severity: categories[0].percentage > 40 ? 'warning' : 'info',
+        });
+    }
+
+    if (paymentMethods.length > 0) {
+        insights.push({
+            type: 'FINANCE_PAYMENT_METHOD',
+            title: `Metode Utama: ${paymentMethods[0].method}`,
+            message: `Metode pembayaran terfavorit Anda adalah ${paymentMethods[0].method} (${paymentMethods[0].count} transaksi).`,
+            severity: 'info',
+        });
+    }
+
+    const netBalance = totalIncome - totalExpense;
+    if (totalIncome > 0 || totalExpense > 0) {
+        insights.push({
+            type: netBalance >= 0 ? 'FINANCE_SURPLUS' : 'FINANCE_DEFICIT',
+            title: netBalance >= 0 ? 'Arus Kas Surplus' : 'Arus Kas Defisit',
+            message: netBalance >= 0 
+                ? `Arus kas ${label.toLowerCase()} mencatat surplus Rp ${Number(netBalance).toLocaleString('id-ID')}.`
+                : `Pengeluaran melebihi pemasukan sebesar Rp ${Number(Math.abs(netBalance)).toLocaleString('id-ID')}.`,
+            severity: netBalance >= 0 ? 'success' : 'warning',
+        });
+    }
+
+    if (tasksCompleted > 0) {
+        insights.push({
+            type: 'PRODUCTIVITY_MILESTONE',
+            title: 'Penyelesaian Tugas',
+            message: `Anda telah menyelesaikan ${tasksCompleted} tugas (${completionRate}% tingkat penyelesaian) pada periode ini.`,
+            severity: 'success',
+        });
+    }
+
+    return {
+        period: {
+            code: period,
+            label,
+            daysCount,
+        },
+        today: {
+            expense: parseFloat(todayRes.rows[0]?.today_expense || 0),
+            income: parseFloat(todayRes.rows[0]?.today_income || 0),
+            nextSchedule: nextSchedRes.rows[0] || null,
+            nextReminder: nextRemRes.rows[0] || null,
+        },
+        finance: {
+            totalExpense,
+            totalIncome,
+            netBalance,
+            totalTransactions,
+            cashflow,
+            categories,
+            paymentMethods,
+            sourceTypes,
+            largestExpenses,
+        },
+        productivity: {
+            tasksCompleted,
+            tasksPending,
+            tasksTotal,
+            completionRate,
+            avgTasksPerDay,
+            remindersTotal,
+            remindersSnoozed,
+            remindersSnoozedRatio,
+        },
+        jarvis: jarvisHealth,
+        insights,
+    };
+}
+
 module.exports = {
     formatRupiah,
     generateProgressBar,
@@ -452,4 +761,5 @@ module.exports = {
     getReminderAnalytics,
     getFullAnalyticsReport,
     syncDailyMetrics,
+    getDashboardAnalytics,
 };

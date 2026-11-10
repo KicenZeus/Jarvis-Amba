@@ -280,9 +280,21 @@ async function getNotificationDeliveryChannels(userId, eventType = 'REMINDER') {
     return 'DISCORD'; // Default fallback
 }
 
+/**
+ * Resolusi ID pengguna kanonik dari saluran eksternal (PRD V3 Sec 16.1 Opsi K)
+ * @param {string} channelType - 'DISCORD' | 'WHATSAPP'
+ * @param {string} externalId - Discord Snowflake / Nomor Telepon WA
+ * @returns {Promise<string|null>} canonical users.id
+ */
+async function resolveCanonicalUserId(channelType, externalId) {
+    const res = await resolveUserByChannel(channelType, externalId);
+    return res.userId || null;
+}
+
 module.exports = {
     CHANNELS,
     resolveUserByChannel,
+    resolveCanonicalUserId,
     linkUserChannel,
     checkAndRecordInboundMessage,
     updateMessageStatus,

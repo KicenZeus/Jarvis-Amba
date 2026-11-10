@@ -1,4 +1,5 @@
 const fs = require('fs');
+const crypto = require('crypto');
 const channelService = require('./channelService');
 const db = require('./db');
 const scheduleService = require('./scheduleService');
@@ -289,10 +290,73 @@ function checkRateLimit(phone, text) {
 }
 
 /**
+ * 5.1 Verifikasi HMAC-SHA256 Signature dari Meta (Phase 0-A Security Hotfix)
+ * Header: x-hub-signature-256: sha256=<signature_hex>
+ * Menggunakan perbandingan string konstan crypto.timingSafeEqual
+ */
+function verifyWhatsAppSignature(req, rawBody) {
+    const appSecret = process.env.WA_APP_SECRET || process.env.WHATSAPP_APP_SECRET;
+    const enforce = (process.env.WA_SIGNATURE_ENFORCE || 'false').toLowerCase() === 'true';
+
+    // Jika secret belum diset di .env
+    if (!appSecret) {
+        if (enforce) {
+            console.error('❌ [WhatsApp Security] WA_APP_SECRET belum dikonfigurasi tetapi WA_SIGNATURE_ENFORCE=true. Menolak request.');
+            return { valid: false, reason: 'APP_SECRET_MISSING' };
+        }
+        return { valid: true, mode: 'BYPASS_NO_SECRET' };
+    }
+
+    const rawSig = req.headers ? (req.headers['x-hub-signature-256'] || req.headers['X-Hub-Signature-256']) : null;
+    if (!rawSig) {
+        if (enforce) {
+            console.warn('⛔ [WhatsApp Security] Header x-hub-signature-256 hilang. Akses ditolak.');
+            return { valid: false, reason: 'MISSING_SIGNATURE' };
+        }
+        console.warn('⚠️ [WhatsApp Security] Header x-hub-signature-256 hilang (mode transisi log-only).');
+        return { valid: true, mode: 'LOG_ONLY_MISSING' };
+    }
+
+    const parts = rawSig.split('=');
+    const signatureHash = parts[1];
+    if (!signatureHash) {
+        if (enforce) return { valid: false, reason: 'MALFORMED_SIGNATURE' };
+        return { valid: true, mode: 'LOG_ONLY_MALFORMED' };
+    }
+
+    const payloadBuffer = typeof rawBody === 'string' ? Buffer.from(rawBody, 'utf8') : (Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(JSON.stringify(rawBody || {}), 'utf8'));
+    const expectedHash = crypto
+        .createHmac('sha256', appSecret)
+        .update(payloadBuffer)
+        .digest('hex');
+
+    const expectedBuf = Buffer.from(expectedHash, 'utf8');
+    const actualBuf = Buffer.from(signatureHash, 'utf8');
+
+    if (expectedBuf.length !== actualBuf.length || !crypto.timingSafeEqual(expectedBuf, actualBuf)) {
+        if (enforce) {
+            console.warn('⛔ [WhatsApp Security] Signature webhook TIDAK VALID. Akses ditolak (401).');
+            return { valid: false, reason: 'SIGNATURE_MISMATCH' };
+        }
+        console.warn('⚠️ [WhatsApp Security] Signature mismatch terdeteksi (mode log-only, request tetap diproses).');
+        return { valid: true, mode: 'LOG_ONLY_MISMATCH' };
+    }
+
+    return { valid: true };
+}
+
+/**
  * 6. Menangani Event Webhook dari Meta (POST /webhook/whatsapp)
  * Memproses pesan teks, rekaman suara (Voice Note STT), dan gambar masuk
  */
 async function handleWebhookEvent(req, res, rawBody) {
+    // Verifikasi HMAC Signature Meta (Phase 0-A)
+    const sigCheck = verifyWhatsAppSignature(req, rawBody);
+    if (!sigCheck.valid) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Unauthorized: Invalid webhook signature', reason: sigCheck.reason }));
+    }
+
     // Segera beri response HTTP 200 ke Meta agar tidak timeout / ditandai gagal
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'EVENT_RECEIVED' }));
@@ -422,6 +486,87 @@ async function handleWebhookEvent(req, res, rawBody) {
                 }
 
                 if (!textContent.trim()) continue;
+
+                // --- Phase 1: Penautan Akun WhatsApp Inbound (!link <code>) (PRD V3 Sec 16.3) ---
+                if (textContent.trim().toLowerCase().startsWith('!link')) {
+                    const parts = textContent.trim().split(/\s+/);
+                    const linkCode = parts[1] ? parts[1].trim() : '';
+
+                    if (!/^\d{6}$/.test(linkCode)) {
+                        await sendWhatsAppTextMessage(
+                            fromNumber,
+                            `⚠️ Format perintah penautan salah.\nGunakan: *!link <kode_6_digit>*\nContoh: *!link 123456*\n\nKode dapat diperoleh dari menu Profil di Web Dashboard / Mobile App Jarvis.`
+                        );
+                        continue;
+                    }
+
+                    try {
+                        const codeHash = crypto.createHash('sha256').update(linkCode).digest('hex');
+                        const codeRes = await db.query(
+                            `SELECT id, auth_user_id, attempts, max_attempts, expires_at 
+                             FROM account_link_codes 
+                             WHERE code_hash = $1 AND expires_at > NOW() 
+                             LIMIT 1;`,
+                            [codeHash]
+                        );
+
+                        if (codeRes.rows.length === 0) {
+                            await sendWhatsAppTextMessage(
+                                fromNumber,
+                                `❌ Kode penautan tidak valid atau sudah kedaluwarsa.\nSilakan generate kode baru di Web Dashboard atau aplikasi Jarvis.`
+                            );
+                            continue;
+                        }
+
+                        const codeRow = codeRes.rows[0];
+
+                        // Cari user kanonik berdasarkan auth_user_id
+                        let targetUser = await db.query(
+                            'SELECT id, display_name FROM users WHERE auth_user_id = $1 LIMIT 1;',
+                            [codeRow.auth_user_id]
+                        );
+
+                        let canonicalUserId = targetUser.rows[0]?.id;
+
+                        // Jika user kanonik belum ada di users (user baru dari Web/Auth)
+                        if (!canonicalUserId) {
+                            const newId = `user_${String(codeRow.auth_user_id).replace(/-/g, '').substring(0, 16)}`;
+                            const createRes = await db.query(
+                                `INSERT INTO users (id, discord_user_id, auth_user_id, display_name, role, status, created_at, updated_at)
+                                 VALUES ($1, $1, $2, $3, 'USER', 'ACTIVE', NOW(), NOW())
+                                 RETURNING id;`,
+                                [newId, codeRow.auth_user_id, senderName]
+                            );
+                            canonicalUserId = createRes.rows[0].id;
+                        }
+
+                        // Tautkan nomor ke user_channels
+                        await db.query(
+                            `INSERT INTO user_channels (user_id, channel_type, external_user_id, phone_number, display_name, is_primary, status, created_at, updated_at)
+                             VALUES ($1, 'WHATSAPP', $2, $2, $3, TRUE, 'ACTIVE', NOW(), NOW())
+                             ON CONFLICT (channel_type, external_user_id) 
+                             DO UPDATE SET user_id = EXCLUDED.user_id, updated_at = NOW();`,
+                            [canonicalUserId, fromNumber, senderName]
+                        );
+
+                        // Hapus kode OTP yang sudah sukses terpakai
+                        await db.query('DELETE FROM account_link_codes WHERE id = $1;', [codeRow.id]);
+
+                        console.log(`🔗 [WhatsApp Linking] Nomor ${fromNumber} berhasil ditautkan ke user kanonik ${canonicalUserId}`);
+                        await sendWhatsAppTextMessage(
+                            fromNumber,
+                            `🎉 *SELAMAT!* Akun WhatsApp Anda (${fromNumber}) berhasil ditautkan ke akun Jarvis!\n\nSekarang Anda dapat mengakses seluruh asisten, pengingat, dan riwayat tugas langsung dari WhatsApp.`
+                        );
+                        continue;
+                    } catch (linkErr) {
+                        console.error('❌ [WhatsApp Linking] Gagal memproses !link:', linkErr.message);
+                        await sendWhatsAppTextMessage(
+                            fromNumber,
+                            `Maaf, terjadi kendala saat menautkan akun. Silakan coba sesaat lagi.`
+                        );
+                        continue;
+                    }
+                }
 
                 console.log(`📥 [WhatsApp] Pesan [${messageType}] dari ${senderName} (${fromNumber}): "${textContent.substring(0, 100)}"`);
 
@@ -909,8 +1054,65 @@ ATURAN WAJIB MODE SUARA:
 3. HINDARI format visual rumit seperti markdown tebal-miring bertumpuk, tanda kutip berlebihan, simbol visual, tabel, atau rentetan emotikon yang aneh bila dibacakan oleh mesin suara.]`;
                 }
 
-                // 3. Forward ke Jarvis Core (n8n Webhook)
+                // Helper internal untuk memproses balasan via Direct Gemini AI (Phase 0-A)
+                const processDirectGeminiFlow = async () => {
+                    try {
+                        const fallbackReply = await generateDirectGeminiReply({
+                            userMessage: textContent,
+                            userId: internalUserId || fromNumber,
+                            channelId: `wa_${cleanPhone}`,
+                            userName: userDisplayName,
+                            callsign: callsign,
+                            userRole: isOwner ? 'OWNER' : (resolved.user?.role || 'USER'),
+                            memories: userMemories,
+                            wantsVoice: wantsVoice,
+                        });
+
+                        if (wantsVoice) {
+                            let voiceSent = false;
+                            try {
+                                console.log(`🎙️ [WhatsApp] Memproses Voice Note TTS via Direct Gemini untuk ${fromNumber}...`);
+                                const ttsFilePath = await generateTTS(fallbackReply, 'id-ID-ArdiNeural');
+                                if (ttsFilePath && fs.existsSync(ttsFilePath)) {
+                                    const audioBuf = fs.readFileSync(ttsFilePath);
+                                    const sendRes = await sendWhatsAppAudioMessage(fromNumber, audioBuf);
+                                    cleanupAudio(ttsFilePath);
+                                    if (sendRes.success) {
+                                        voiceSent = true;
+                                        console.log(`🎙️ [WhatsApp] Voice Note berhasil dikirim ke ${fromNumber}`);
+                                    }
+                                }
+                            } catch (ttsErr) {
+                                console.warn('⚠️ [WhatsApp] Gagal generate audio TTS fallback:', ttsErr.message);
+                            }
+                            if (!voiceSent) {
+                                await sendWhatsAppTextMessage(fromNumber, fallbackReply);
+                            }
+                        } else {
+                            await sendWhatsAppTextMessage(fromNumber, fallbackReply);
+                        }
+                        await channelService.updateMessageStatus('WHATSAPP', messageId, 'COMPLETED', fallbackReply);
+                    } catch (geminiErr) {
+                        console.error('❌ [WhatsApp] Direct Gemini AI juga gagal:', geminiErr.message);
+                        await sendWhatsAppTextMessage(
+                            fromNumber,
+                            'Maaf, Amba sedang mengalami sedikit kendala sistem. Silakan coba lagi.'
+                        );
+                        await channelService.updateMessageStatus('WHATSAPP', messageId, 'ERROR');
+                    }
+                };
+
+                // 3. Routing ke AI Core (Direct Gemini AI default / n8n jika USE_N8N=true)
+                const USE_N8N = (process.env.USE_N8N || 'false').toLowerCase() === 'true';
+
+                if (!USE_N8N) {
+                    await processDirectGeminiFlow();
+                    continue;
+                }
+
+                // Jalur n8n sekunder jika diaktifkan eksplisit
                 try {
+                    const n8nTimeoutMs = parseInt(process.env.N8N_TIMEOUT_MS, 10) || 8000;
                     const n8nUrl = process.env.N8N_WEBHOOK_URL || 'http://n8n:5678/webhook/jarvis-discord';
                     const n8nPayload = {
                         schemaVersion: 1,
@@ -940,6 +1142,7 @@ ATURAN WAJIB MODE SUARA:
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(n8nPayload),
+                        signal: AbortSignal.timeout(n8nTimeoutMs),
                     });
 
                     if (n8nRes.ok) {
@@ -1002,50 +1205,7 @@ ATURAN WAJIB MODE SUARA:
                     }
                 } catch (coreErr) {
                     console.warn(`🤖 [WhatsApp] n8n offline/unreachable (${coreErr.message}), memproses langsung via Direct Gemini AI...`);
-                    try {
-                        const fallbackReply = await generateDirectGeminiReply({
-                            userMessage: textContent,
-                            userId: internalUserId || fromNumber,
-                            channelId: `wa_${cleanPhone}`,
-                            userName: userDisplayName,
-                            callsign: callsign,
-                            userRole: isOwner ? 'OWNER' : (resolved.user?.role || 'USER'),
-                            memories: userMemories,
-                            wantsVoice: wantsVoice,
-                        });
-
-                        if (wantsVoice) {
-                            let voiceSent = false;
-                            try {
-                                console.log(`🎙️ [WhatsApp] Memproses Voice Note TTS via Direct Gemini untuk ${fromNumber}...`);
-                                const ttsFilePath = await generateTTS(fallbackReply, 'id-ID-ArdiNeural');
-                                if (ttsFilePath && fs.existsSync(ttsFilePath)) {
-                                    const audioBuf = fs.readFileSync(ttsFilePath);
-                                    const sendRes = await sendWhatsAppAudioMessage(fromNumber, audioBuf);
-                                    cleanupAudio(ttsFilePath);
-                                    if (sendRes.success) {
-                                        voiceSent = true;
-                                        console.log(`🎙️ [WhatsApp] Voice Note berhasil dikirim ke ${fromNumber}`);
-                                    }
-                                }
-                            } catch (ttsErr) {
-                                console.warn('⚠️ [WhatsApp] Gagal generate audio TTS fallback:', ttsErr.message);
-                            }
-                            if (!voiceSent) {
-                                await sendWhatsAppTextMessage(fromNumber, fallbackReply);
-                            }
-                        } else {
-                            await sendWhatsAppTextMessage(fromNumber, fallbackReply);
-                        }
-                        await channelService.updateMessageStatus('WHATSAPP', messageId, 'COMPLETED', fallbackReply);
-                    } catch (geminiErr) {
-                        console.error('❌ [WhatsApp] Direct Gemini AI juga gagal:', geminiErr.message);
-                        await sendWhatsAppTextMessage(
-                            fromNumber,
-                            'Maaf, Amba sedang mengalami sedikit kendala sistem. Silakan coba lagi.'
-                        );
-                        await channelService.updateMessageStatus('WHATSAPP', messageId, 'ERROR');
-                    }
+                    await processDirectGeminiFlow();
                 }
             }
         }
@@ -1055,6 +1215,7 @@ ATURAN WAJIB MODE SUARA:
 module.exports = {
     handleWebhookVerification,
     handleWebhookEvent,
+    verifyWhatsAppSignature,
     sendWhatsAppTextMessage,
     sendWhatsAppAudioMessage,
     downloadMetaMedia,
